@@ -1,0 +1,68 @@
+// Run with a local static server. Playwright and a Chromium browser are external dev tools.
+const {chromium}=require('playwright');
+const assert=require('node:assert/strict');
+const fs=require('node:fs/promises');
+const path=require('node:path');
+const base=process.env.TEST_URL||'http://127.0.0.1:8766';
+(async()=>{
+  const browser=await chromium.launch({headless:true,...(process.env.BROWSER_EXECUTABLE?{executablePath:process.env.BROWSER_EXECUTABLE}:{}),args:['--disable-gpu']});
+  const context=await browser.newContext({viewport:{width:1440,height:1100},deviceScaleFactor:1});
+  const page=await context.newPage(),errors=[];
+  page.on('pageerror',e=>errors.push(String(e)));
+  await fs.mkdir('.qa',{recursive:true});
+  await page.goto(base,{waitUntil:'networkidle'});
+  await page.waitForFunction(()=>window.copyLab);
+  const state=()=>page.evaluate(()=>window.copyLab.getState());
+  assert.equal((await state()).commands,2);
+  await page.screenshot({path:'.qa/desktop-concat.png',fullPage:true});
+  await page.locator('#next').click();assert.equal((await state()).step,1);
+  await page.locator('#previous').click();assert.equal((await state()).step,0);
+  await page.locator('[data-command="1"]').click();assert.equal((await state()).step,3);
+  await page.locator('#preset').selectOption('2');assert.equal((await state()).rtlOK,true);
+  await page.locator('#lane').fill('127');await page.locator('#lane').dispatchEvent('input');
+  assert.equal(await page.locator('#lane-value').textContent(),'127');
+  await page.locator('#tab-slice').click();
+  await page.locator('#preset').selectOption('2');assert.equal((await state()).commands,3);
+  await page.locator('#cfg-x').fill('5');await page.locator('#cfg-x').dispatchEvent('change');
+  assert.equal((await state()).config.ow,1);
+  await page.locator('#tab-im2col').click();assert.equal((await state()).commands,4);
+  await page.locator('[data-strategy="window"]').click();assert.equal((await state()).commands,18);
+  await page.locator('[data-strategy="kernel"]').click();assert.equal((await state()).commands,4);
+  await page.locator('#preset').selectOption('1');assert((await state()).zeroCount>0);
+  assert.equal(await page.locator('#zero-legend').isVisible(),true);
+  await page.locator('#preset').selectOption('4');assert.equal((await state()).rtlOK,true);
+  await page.locator('#speed').selectOption('350');
+  await page.locator('#play').click();await page.waitForTimeout(1000);await page.locator('#play').click();
+  const afterPlay=await state();assert(afterPlay.step>=1);assert.equal(afterPlay.playing,false);
+  await page.locator('#progress').fill(String(afterPlay.events));await page.locator('#progress').dispatchEvent('input');
+  assert.match(await page.locator('#readout').textContent(),/搬运完成/);
+  await page.locator('#restart').click();
+  await page.locator('[data-source="X0:0:0"]').click();assert.match(await page.locator('#readout').textContent(),/选中/);
+  await page.locator('#preview-result').check();
+  const downloadEvent=page.waitForEvent('download');await page.locator('#download-plan').click();
+  const download=await downloadEvent;const downloaded=path.resolve('.qa/download-plan.json');await download.saveAs(downloaded);
+  const plan=JSON.parse(await fs.readFile(downloaded,'utf8'));assert.equal(plan.commands.length,4);assert.equal(plan.alignmentChecksPassed,true);
+  await page.locator('#restart').click();await page.evaluate(()=>scrollTo(0,0));
+  await page.screenshot({path:'.qa/desktop-im2col.png',fullPage:true});
+  const permalink=page.url();await page.reload({waitUntil:'networkidle'});assert.equal((await state()).config.vec,128);assert.equal(page.url(),permalink);
+  for(const width of [390,320]){
+    await page.setViewportSize({width,height:844});
+    for(const op of ['concat','slice','im2col']){
+      await page.locator(`#tab-${op}`).click();
+      const dimensions=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth}));
+      assert(dimensions.scroll<=dimensions.width+1,`${op} has horizontal page overflow at ${width}: ${JSON.stringify(dimensions)}`);
+      const invalid=await page.locator('input,select,button').evaluateAll(nodes=>nodes.filter(n=>{const r=n.getBoundingClientRect();if(!r.width||!r.height)return false;const style=getComputedStyle(n);if(style.visibility==='hidden')return false;return !n.closest('.matrix-scroll,.command-list')&&(r.left<-.5||r.right>innerWidth+.5)}).map(n=>n.id||n.textContent));
+      assert.deepEqual(invalid,[],`${op} controls overflow at ${width}`);
+    }
+    await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:`.qa/mobile-${width}.png`,fullPage:true});
+  }
+  await page.goto(`${base}/?op=im2col&h=2&w=2&r=3&s=3&dh=3&dw=3`,{waitUntil:'networkidle'});
+  assert.equal(await page.locator('#empty-state').isVisible(),true);
+  await page.goto(`${base}/?op=im2col&h=2&w=2&r=2&s=2&dh=3&dw=3&ph=1&pw=1`,{waitUntil:'networkidle'});
+  assert.equal((await state()).commands,0);assert.equal((await state()).zeroCount,4);
+  assert.match(await page.locator('#readout').textContent(),/没有有效输入段/);
+  assert.deepEqual(errors,[]);
+  await fs.writeFile('.qa/browser-result.json',JSON.stringify({passed:true,viewports:[1440,390,320],checks:['three operations','presets','parameter changes','two im2col strategies','animation play/pause','single step','command jump','channel selection','padding','empty output','all-padding output','JSON download','URL restore','responsive overflow','no runtime exceptions']},null,2));
+  console.log('PASS: browser interactions, download, animation, URL restore, edge cases and 1440 / 390 / 320px layouts.');
+  await browser.close();
+})().catch(e=>{console.error(e);process.exit(1);});
