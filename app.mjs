@@ -1,5 +1,7 @@
 import {build,defaults,presets,normalize,exportPlan,COMMIT} from './engine.mjs';
 import {performanceDefaults,normalizePerformance,analyze,compare,tileScenario,strategyNames} from './performance.mjs';
+import {addressTrace,selectedAddresses} from './addresses.mjs';
+import {renderAddressView} from './address-view.mjs';
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=n=>Number(n).toLocaleString('en-US');
@@ -8,7 +10,7 @@ const hex=n=>`0x${n.toString(16).toUpperCase().padStart(4,'0')}`;
 const ROWS_PER_PAGE=6;
 const params=new URLSearchParams(location.search);
 let costOptions=normalizePerformance(Object.fromEntries(Object.keys(performanceDefaults).filter(k=>params.has('perf_'+k)).map(k=>[k,params.get('perf_'+k)])));
-let comparison,metrics;
+let comparison,metrics,addressReport;
 let kind=['copy','concat','slice','im2col'].includes(params.get('op'))?params.get('op'):'copy';
 const configs=structuredClone(defaults);
 for(const k of Object.keys(configs[kind]))if(params.has(k))configs[kind][k]=params.get(k);
@@ -126,8 +128,9 @@ function renderPerformance(){
     const bar=(label,value,cls)=>`<div class="traffic-row"><span>${label}</span><div class="traffic-track"><i class="${cls}" style="width:${value/max*100}%"></i></div><b>${bytesLabel(value)}</b></div>`;
     $('tile-result').innerHTML=`<div class="tile-status ${tile.fits?'fits':'too-large'}"><strong>${tile.fits?'容量可容纳这个假设方案':'空间不足，当前分块不可采用'}</strong><span>${tile.tiles} 块 · 峰值 ${bytesLabel(tile.peakBytes)} / 可用 ${bytesLabel(tile.capacityBytes)}</span></div>${bar('完整展开后写回、再读',tile.baselineBytes,'baseline')}${bar('片上展开并直接消费',tile.readBytes,'fused')}<p class="cost-footnote">${tile.fits?'容量检查通过仍不代表执行实现已经存在。':'请减小窗口分块或增加可用空间。'}矩形加载可能包含未使用的输入，因此 stride / dilation 较大时，分块并不总是减少输入读取。两条柱只比较上述外存假设，与上方 L1/MIF 端点配置分开。</p>`;
   }else $('tile-result').innerHTML='<p>当前没有输出窗口，无法计算分块。</p>';
-  renderCommandCost();
+  renderCommandCost();addressReport=addressTrace(model,costOptions);renderAddresses();
 }
+function renderAddresses(){renderAddressView({model,trace:addressReport,step,selection,lane,onJump:index=>{stop();selection=null;step=index;renderFrame();}});}
 function renderCommandCost(){
   const cmd=currentCommand(),cost=metrics?.commands[cmd?.id];
   $('command-cost').innerHTML=metrics?.eligible&&cost?`<strong>跟随动画 · COPY ${cmd.id+1}</strong><span>读：${cost.read.segments} 个合并段 → ${cost.read.beats} 拍 / ${cost.read.requests} 请求</span><span>写：${cost.write.segments} 个合并段 → ${cost.write.beats} 拍 / ${cost.write.requests} 请求</span><small>动画一步是逻辑连续段，不是总线一拍；这里统计本条指令的全部请求。</small>`:'<strong>保留地址动画，暂不展示本条指令的硬件请求数。</strong><span>只有完整候选通过所列检查后才启用请求和成本估算。</span>';
@@ -191,6 +194,15 @@ function renderReadout(){
     $('readout').innerHTML=`<div><strong>COPY ${cmd.id+1} / ${model.commands.length}</strong> · ${esc(event.label)}<small><code>${first.src.source}[${first.src.row},${first.src.col}${last.src.col!==first.src.col?'…'+last.src.col:''}] → Y[${out.row},${out.col}${event.pairs.length>1?'…'+model.output[last.dst].col:''}]</code><br>首元素偏移：源 ${hex(srcStart)} → 目的 ${hex(dstStart)}；${model.vector>1?'整段通道一起搬':'数值原样复制'}。</small></div><span class="readout-byte">${fmt(event.pairs.length*model.vector*model.bytes)} B</span>`;
   }
 }
+function appendAddressReadout(){
+  if(!addressReport)return;
+  const picked=selectedAddresses(model,addressReport,selection,lane),r=addressReport.segments[Math.min(step,model.events.length-1)];
+  const span=a=>`${hex(a.start)} → ${hex(a.end)}`;
+  let text='';
+  if(picked)text=`示例元素地址 ${picked.buffer}：${span(picked.element)}${picked.kind==='padding'?'；补零格没有源地址':picked.kind==='untouched'?'；这里不写入':''}。`;
+  else if(r)text=`${step===model.events.length?'最后一段':'本段'}示例地址：读 ${r.sourceBuffer} ${span(r.src)}；写 Y ${span(r.dst)}。`;
+  if(text)$('readout').querySelector('div')?.insertAdjacentHTML('beforeend',`<small class="address-inline">${text} <a href="#addresses">查看地址计算 ↓</a></small>`);
+}
 function renderCommands(){
   const cmd=currentCommand();
   if(!cmd){$('command-list').innerHTML='<p class="section-intro">没有有效 copy。</p>';$('command-detail').innerHTML='<p>调整参数后，这里会显示拆分指令。</p>';return;}
@@ -225,7 +237,7 @@ function renderFrame(follow=true){
   const cmdEvents=cmd?model.events.slice(cmd.first,cmd.first+cmd.count):[];
   renderSources(new Set(activePairs.map(p=>p.src.key)),new Set(cmdEvents.flatMap(e=>e.pairs.map(p=>p.src.key))));
   if(!model.error)renderOutput(new Set(activePairs.map(p=>p.dst)),new Set(cmdEvents.flatMap(e=>e.pairs.map(p=>p.dst))));
-  renderReadout();renderCommands();renderRTL();renderCommandCost();
+  renderReadout();appendAddressReadout();renderCommands();renderRTL();renderCommandCost();renderAddresses();
   $('progress').max=model.events.length||1;$('progress').value=step;
   $('progress-label').textContent=`已搬 ${step} / ${model.events.length} 段`;
   $('previous').disabled=step===0;$('next').disabled=step>=model.events.length;
@@ -265,9 +277,9 @@ $('preview-result').onchange=()=>renderFrame(false);
 $('follow-page').onchange=()=>renderFrame();
 $('lane').oninput=()=>{lane=+$('lane').value;renderFrame(false);};
 $('apply-recommended').onclick=()=>{if(!comparison.best||kind!=='im2col')return;config().strategy=comparison.best.strategy;currentPreset=-1;rebuild();$('visual-area').scrollIntoView({behavior:'smooth',block:'center'});playing=true;animate();};
-for(const input of document.querySelectorAll('[data-cost]'))input.onchange=()=>{costOptions[input.dataset.cost]=input.value;renderPerformance();updateURL();};
+for(const input of document.querySelectorAll('[data-cost]'))input.onchange=()=>{costOptions[input.dataset.cost]=input.value;renderPerformance();renderReadout();appendAddressReadout();updateURL();};
 $('download-plan').onclick=()=>{
-  const report={...exportPlan(model),performance:{warning:'Static request model and user-supplied cost assumptions, not RTL timing or executable LD/ST. Invalid candidates are excluded from ranking.',assumptions:costOptions,current:metrics,candidates:comparison.candidates.map(c=>({strategy:c.strategy,commands:c.model.commands.length,metrics:c.metrics})),recommendedStrategy:comparison.best?.strategy??null,tileArchitectureOnly:tileScenario(model,costOptions)}};
+  const report={...exportPlan(model),addresses:addressReport,performance:{warning:'Static request model and user-supplied cost assumptions, not RTL timing or executable LD/ST. Invalid candidates are excluded from ranking.',assumptions:costOptions,current:metrics,candidates:comparison.candidates.map(c=>({strategy:c.strategy,commands:c.model.commands.length,metrics:c.metrics})),recommendedStrategy:comparison.best?.strategy??null,tileArchitectureOnly:tileScenario(model,costOptions)}};
   const blob=new Blob([JSON.stringify(report,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');
   a.href=url;a.download=`${kind}-copy-plan.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);
 };
@@ -279,4 +291,4 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();});
 window.addEventListener('pagehide',stop);
 rebuild();
 // Public read-only state for reproducible browser checks, not a hardware interface.
-window.copyLab={getState:()=>({kind,config:{...config()},step,playing,commands:model.commands.length,events:model.events.length,rtlOK:model.rtlOK,zeroCount:model.zeroCount,output:model.output.map(o=>({from:o.from?.value??0,event:o.event,untouched:!!o.untouched})),performance:{assumptions:{...costOptions},eligible:metrics.eligible,estimate:metrics.estimate,recommended:comparison.best?.strategy??null,tile:tileScenario(model,costOptions)}})};
+window.copyLab={getState:()=>({kind,config:{...config()},step,playing,commands:model.commands.length,events:model.events.length,rtlOK:model.rtlOK,zeroCount:model.zeroCount,output:model.output.map(o=>({from:o.from?.value??0,event:o.event,untouched:!!o.untouched})),addresses:{current:addressReport.segments[Math.min(step,model.events.length-1)]??null,buffers:addressReport.buffers,selected:selectedAddresses(model,addressReport,selection,lane)},performance:{assumptions:{...costOptions},eligible:metrics.eligible,estimate:metrics.estimate,recommended:comparison.best?.strategy??null,tile:tileScenario(model,costOptions)}})};

@@ -52,7 +52,7 @@ python -m http.server 8766
 ## 验证
 
 ```sh
-node --test tests/engine.test.mjs tests/performance.test.mjs
+node --test tests/engine.test.mjs tests/performance.test.mjs tests/addresses.test.mjs
 ```
 
 测试使用独立的输出映射，对照每一条描述符的地址遍历，覆盖不同元素宽度、向量长度、slice 步长，以及 240 组卷积参数下的三种 im2col 策略；另外检查空输出、全 padding、对齐取整和越界情况。
@@ -62,6 +62,7 @@ node --test tests/engine.test.mjs tests/performance.test.mjs
 ```sh
 node tests/browser.cjs
 node tests/performance-browser.cjs
+node tests/addresses-browser.cjs
 ```
 
 可以通过 `TEST_URL` 更换站点地址、`BROWSER_EXECUTABLE` 指定浏览器。浏览器检查覆盖实际播放和暂停、参数修改、指令跳转、通道选择、JSON 下载、URL 参数恢复，以及 1440 / 390 / 320px 布局。QA 结果仅生成在被忽略的 `.qa/` 目录。
@@ -85,3 +86,15 @@ GitHub Pages 从 `codex/copy-lab` 分支的仓库根目录发布。修改网站�
 `performance.mjs` 可独立复现读写请求与成本。JSON 导出附带全部假设、候选统计、推荐策略和片上分块对照。URL 保留策略和性能参数。
 
 端点菜单只选择流量模型，并不生成 CP/LD/ST opcode。MIF↔MIF 是端点流量对照；原生 CP 通道支持范围仍遵从页面中的通道说明。实际部署需映射原生指令、提供物理缓冲区并做 RTL 仿真。性能排名仅是此成本公式和三个候选的结果，不是最优性证明或硬件性能保证。
+
+
+## 地址计算与逐段范围
+
+COPY、concat、slice、im2col 均在动画下方展示：
+
+- 源/目的缓冲区的示例基址和容量；A/X 从 `0x10000000` 起，B 从 `0x20000000` 起，Y 从 `0x30000000` 起。分别叠加带宽设置中的输入/输出页内偏移。它们不是已分配的设备地址。
+- 当前连续段的首字节、末字节（包含在内）、长度和缓冲区内偏移；下一段的起点、跳过或回退情况。地址按有效数据计算，不是RTL取整后的总线访问范围。
+- 各功能对应的矩阵/窗口坐标公式、当前参数代入，以及描述符 `base + E*(start0+(start1+y)*glb0+(start2+z)*glb0*glb1)` 的独立对照。
+- 全部COPY的起止摘要和本条COPY的逐段地址表，可点击跳到动画。分段访问的首尾包络不代表中间地址全部被访问。
+- 点击格子可看整格和当前显示通道的元素地址；padding明确没有源地址，COPY未选中目标格保持原值。im2col各batch共用X缓冲区，batch偏移只加一次。
+- JSON导出附带示例基址、逐段地址和清零范围。三种im2col策略的地址都与原描述符展开、动画坐标映射交叉检查。

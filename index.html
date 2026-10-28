@@ -65,6 +65,23 @@
       </div>
     </section>
 
+    <section class="address-section" id="addresses" aria-labelledby="address-title">
+      <div class="section-heading"><div><p class="eyebrow">跟随每一步动画 / 四个功能都能看地址</p><h2 id="address-title">从哪个地址开始，搬到哪个地址结束？</h2></div><a class="text-link" href="#experiment">回到动画 ↑</a></div>
+      <p class="section-intro">地址按<strong>字节</strong>计算；<code>0x</code> 表示十六进制。下面采用固定的<strong>示例缓冲区基址</strong>，不代表真实设备分配的物理地址。输入和输出的页内偏移跟随下方带宽设置；每条描述符自己的 base 偏移还要另外加上。</p>
+      <div class="address-buffers" id="address-buffers"></div>
+      <p class="address-validity" id="address-validity"></p>
+      <div class="address-prezero" id="address-prezero" hidden></div>
+      <div class="address-selection" id="address-selection" aria-live="polite" hidden></div>
+      <h3 class="address-current-title" id="address-current-title"></h3>
+      <div class="address-current" id="address-current" aria-live="polite"></div>
+      <p class="address-equation">本段末字节 = 本段起点 + 搬运字节数 − 1。下一段可能跳过地址、返回较早地址，或切换源缓冲区。</p>
+      <div class="address-calculation"><h3>本段第一个元素的地址，怎样算出来？</h3><p id="address-coordinate-note"></p><div id="address-formulas" class="address-formulas"></div><p class="address-muted">这里计算整段的第一个元素（通道 0）；更换“每格显示通道”并点击格子，可以单独查看那个元素的地址。动画仍搬整段通道。</p></div>
+      <details class="formula-details"><summary>展开：用 COPY 描述符计算同一个地址</summary><div class="formula-content"><pre id="address-descriptor-formula"></pre><p>描述符的 base 偏移、start 和局部坐标会一起参与计算。行/面地址不是简单把每段字节数累加；要按 global 指定的行距、面距前进。</p></div></details>
+      <details class="formula-details"><summary>展开：本条 COPY 的逐段地址表（可点击跳转）</summary><div id="address-segments"></div></details>
+      <div class="address-overview" id="address-overview"></div>
+      <p class="address-muted">地址表可上下、左右滚动；绿色行对应当前 COPY 或当前段。</p>
+    </section>
+
     <section class="bandwidth-section" id="bandwidth" aria-labelledby="bandwidth-title">
       <div class="section-heading"><div><p class="eyebrow">V2 / 在搬对之后，比较搬运成本</p><h2 id="bandwidth-title">指令少，不等于带宽利用率高。</h2></div><span class="version-badge">请求模型 + 可调假设</span></div>
       <p class="section-intro">同一份输出，比较有效字节、128B 数据拍和端点请求。先排除不符合硬件约束的方案，再按假设估算成本。<strong>动画速度不代表硬件时间。</strong></p>
