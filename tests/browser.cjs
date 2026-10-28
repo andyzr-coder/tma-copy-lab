@@ -56,6 +56,10 @@ const base=process.env.TEST_URL||'http://127.0.0.1:8766';
     }
     await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:`.qa/mobile-${width}.png`,fullPage:true});
   }
+  await page.goto(`${base}/?op=concat&common=6&a=6&b=6&vec=128`,{waitUntil:'networkidle'});
+  await page.locator('#preview-result').check();
+  const textOverflow=await page.locator('.data-cell').evaluateAll(nodes=>nodes.filter(n=>{const r=document.createRange();r.selectNodeContents(n);return r.getBoundingClientRect().width>n.getBoundingClientRect().width-2}).map(n=>n.textContent));
+  assert.deepEqual(textOverflow,[],'Large values fit cells on a 320px screen');
   await page.goto(`${base}/?op=im2col&h=2&w=2&r=3&s=3&dh=3&dw=3`,{waitUntil:'networkidle'});
   assert.equal(await page.locator('#empty-state').isVisible(),true);
   await page.goto(`${base}/?op=im2col&h=2&w=2&r=2&s=2&dh=3&dw=3&ph=1&pw=1`,{waitUntil:'networkidle'});
