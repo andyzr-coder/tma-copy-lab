@@ -9,7 +9,7 @@ const ROWS_PER_PAGE=6;
 const params=new URLSearchParams(location.search);
 let costOptions=normalizePerformance(Object.fromEntries(Object.keys(performanceDefaults).filter(k=>params.has('perf_'+k)).map(k=>[k,params.get('perf_'+k)])));
 let comparison,metrics;
-let kind=['concat','slice','im2col'].includes(params.get('op'))?params.get('op'):'concat';
+let kind=['copy','concat','slice','im2col'].includes(params.get('op'))?params.get('op'):'copy';
 const configs=structuredClone(defaults);
 for(const k of Object.keys(configs[kind]))if(params.has(k))configs[kind][k]=params.get(k);
 let model,step=0,lane=0,page=0,playing=false,timer=null,selection=null;
@@ -22,9 +22,13 @@ const numberField=(key,label,min,max,help='')=>`<label class="field" for="cfg-${
 const pair=(a,b)=>`<div class="field-pair">${a}${b}</div>`;
 function renderConfig(){
   const c=config();
+  if(currentPreset<0)currentPreset=presets[kind].findIndex(([,preset])=>JSON.stringify(normalize(kind,preset))===JSON.stringify(c));
   $('preset').innerHTML=(currentPreset<0?'<option value="-1">自定义参数</option>':'')+presets[kind].map(([name],i)=>`<option value="${i}" ${i===currentPreset?'selected':''}>${name}</option>`).join('');
-  $('config-title').textContent={concat:'拼接参数',slice:'切片参数',im2col:'窗口参数'}[kind];
-  if(kind==='concat'){
+  $('config-title').textContent={copy:'基础 COPY 参数',concat:'拼接参数',slice:'切片参数',im2col:'窗口参数'}[kind];
+  if(kind==='copy'){
+    $('config-fields').innerHTML=pair(numberField('rows','搬几行',1,6),numberField('cols','每行搬几格',1,6))+pair(numberField('srcCols','源每行总格数',c.cols,8),numberField('dstCols','目的每行总格数',c.cols,8))+pair(numberField('srcX','源从第几列读',0,c.srcCols-c.cols),numberField('dstX','目的从第几列写',0,c.dstCols-c.cols));
+    $('parameter-note').textContent='先按播放看完整复制，再选第二个例子比较两边行距。列号从 0 开始；灰色“—”不属于搬运范围，原值保持不变。';
+  }else if(kind==='concat'){
     $('config-fields').innerHTML=selectField('axis','沿哪个方向拼接？',[['col','左右拼接 · dim0'],['row','上下拼接 · dim1']])+numberField('common',c.axis==='col'?'两边共同的行数':'两边共同的列数',1,6)+pair(numberField('a',c.axis==='col'?'A 的列数':'A 的行数',1,6),numberField('b',c.axis==='col'?'B 的列数':'B 的行数',1,6));
     $('parameter-note').textContent='未拼接的方向必须一样长。这里共用一个参数，避免生成无法拼接的形状。所有坐标从 0 开始。';
   }else if(kind==='slice'){
@@ -54,9 +58,14 @@ function rebuild(){
   renderConfig();renderIntro();renderPerformance();renderFrame();updateURL();
 }
 function renderIntro(){
-  const titles={concat:['CONCAT / 拼接','两个输入，分别写进一个输出','concat 的意思是拼接。A、B 各保持原来的顺序，写到输出中相邻的位置。输入数据不会做加法。'],slice:['SLICE / 切片','只取需要的部分，放到新矩阵里','slice 的意思是选取一部分。调整源起点、输出大小和取样步长，看看哪些数据被保留、哪些没有搬。'],im2col:['IM2COL / 窗口展开','一个窗口，成为输出的一行','在输入上滑动小窗口，把窗口中的数据按“核行 → 核列 → 通道”排成一行。只搬数据，还没有做卷积计算。']};
+  const titles={copy:['COPY / 先学基础搬运','从 A 读出来，原样写到 Y','COPY 就是复制数据：源里的数值保留，在目的位置写入相同数值。一条指令可以描述多行搬运；后面的三个算子，就是安排这些搬运的起点、范围和顺序。'],concat:['CONCAT / 拼接','两个输入，分别写进一个输出','concat 的意思是拼接。A、B 各保持原来的顺序，写到输出中相邻的位置。输入数据不会做加法。'],slice:['SLICE / 切片','只取需要的部分，放到新矩阵里','slice 的意思是选取一部分。调整源起点、输出大小和取样步长，看看哪些数据被保留、哪些没有搬。'],im2col:['IM2COL / 窗口展开','一个窗口，成为输出的一行','在输入上滑动小窗口，把窗口中的数据按“核行 → 核列 → 通道”排成一行。只搬数据，还没有做卷积计算。']};
   const [k,title,description]=titles[kind];$('operation-kicker').textContent=k;$('operation-title').textContent=title;$('operation-description').textContent=description;
   $('strategy-control').hidden=kind!=='im2col';
+  $('copy-introduction').hidden=kind!=='copy';
+  if(kind==='copy'){
+    const c=config(),E=model.vector*model.bytes;
+    $('copy-facts').innerHTML=`<div><span>① 从哪读 / 写到哪</span><b>A 第 ${c.srcX} 列 → Y 第 ${c.dstX} 列</b><small>各自缓冲区内起点：${c.srcX*E}B → ${c.dstX*E}B</small></div><div><span>② 每行搬多少</span><b>${c.cols} 格 × ${E}B = ${c.cols*E}B</b><small>box0 = ${c.cols*model.vector} 个元素，共搬 ${c.rows} 行</small></div><div><span>③ 下一行怎么走</span><b>源 +${c.srcCols*E}B · 目的 +${c.dstCols*E}B</b><small>这是两行起点的间距，不是额外搬运量</small></div>`;
+  }
   for(const button of document.querySelectorAll('[data-strategy]'))button.setAttribute('aria-pressed',button.dataset.strategy===config().strategy);
   $('empty-state').hidden=!model.error;$('empty-state').textContent=model.error||'';$('visual-workspace').hidden=!!model.error;
   const output=kind==='im2col'?`${model.rows} × ${model.k??0}`:`${model.rows} × ${model.cols*model.vector}`;
@@ -65,6 +74,7 @@ function renderIntro(){
   $('output-shape').textContent=kind==='im2col'?`${model.rows} 窗口 × ${model.cols} 核位置`:`${model.rows} 行 × ${model.cols} 格`;
   $('zero-legend').hidden=!model.prezero;
   $('window-legend').hidden=kind!=='im2col';
+  $('untouched-legend').hidden=kind!=='copy'||!model.output.some(o=>o.untouched);
   $('lane-control').hidden=model.vector===1;$('lane').max=model.vector-1;$('lane').value=0;
   $('lane-caption').textContent=`实际每次搬整个 ${model.vector} 元素段，而非只搬显示的通道。`;
   $('learning-note').innerHTML=model.error?'':`<strong>观察重点：</strong>${model.explain}${kind==='im2col'?`<br><strong>三种拆法对照：</strong>当前 ${model.commands.length} 条 copy，均需读、写各 ${fmt(model.payloadElements*model.bytes)}B 有效数据。<a href="#bandwidth">下方比较实际段长度、请求数量和估算成本。</a>`:''}${model.prezero?'<br><strong>补零是前置步骤：</strong>假设整块输出已由外部清零，橙色格不会发起越界读取。清零未计入上方有效搬运，下方成本单独计入。':''}`;
@@ -99,6 +109,7 @@ function renderPerformance(){
     return `<tr class="${active?'cost-selected':''}"><th>${esc(c.name)}${active?'<small>当前动画</small>':''}${best?.strategy===c.strategy?'<small class="cost-best">当前假设下最低</small>':''}</th><td>${c.model.commands.length} / ${c.model.events.length}</td><td>${range(x.segmentWidths)}</td><td>${x.commands.reduce((n,a)=>n+a.readSegments,0)} / ${x.commands.reduce((n,a)=>n+a.writeSegments,0)}<small>逻辑地址合并</small></td><td>${x.eligible?`${x.read.requests} / ${x.write.requests}`:'—'}</td><td>${x.estimate?timeLabel(x.estimate.totalNs):'—'}</td><td>${x.eligible?'通过所列检查':c.model.commands.length?'不能原样下发':'无 COPY'}</td></tr>`;
   }).join('')}</tbody></table><p class="cost-footnote">${m.zeroBytes?`清零额外写 ${bytesLabel(m.zeroBytes)}，按一个连续外部写操作估算为 ${m.zero.beats} 拍、${m.zero.requests} 个写请求。`:''}<strong>通过的是 CP 风格地址检查；LD/ST 端点字段映射尚未生成和验证。</strong>64B 有效行仍占 128B 数据拍。有效字节占比不是整体硬件利用率；即使达到 100%，也可能有等待和重复读取。</p>`;
   const advice=[];const c=config();
+  if(kind==='copy')advice.push(['先分清搬运长度和行距',`这条 COPY 每行读、写各 ${c.cols*model.vector*model.bytes}B。源、目的的行距分别决定下一行起点；未选中的位置不搬，也不清零。两边地址都连续时，控制器可以各自合并行；有间隔的那一侧会保留多个段。`],['再分清指令、请求和动画步','当前始终是一条二维 COPY。动画按行展示，控制器再根据连续性和端点规则生成请求，所以一条指令不等于一拍传完。先选“满足对齐的例子”，再看下表。']);
   if(kind==='concat')advice.push(c.axis==='row'?['上下拼接：两侧都连续','当前每个输入在源和目的中都占连续区域；控制器会自动合并连续行。主要成本是完整读取和写入各一次，继续减少描述符维度通常无额外带宽收益。']:['左右拼接：读端连续，写端分段','A、B 的源各自连续，目的每行中间要留出另一输入的位置。行越窄，请求和对齐越重要；如果生产者可直接写最终输出位置，可省去一次拼接搬运，但这需要上层接口配合。']);
   if(kind==='slice')advice.push(c.sx>1?['隔列切片：窄段是主要限制','只搬选中的列可以减少有效字节，但每个窄段仍可能占一整拍，且当前 RTL 可能无法精确执行。整块先搬到片上再筛选是另一个架构选项，会多读数据，需要比较取样密度与片上重排成本。']:['连续切片：优先保留长行','整行连续时可自动合并；只切出行中一小段时，源端行之间仍有空隙。行步长改变地址间距，不会自动创造数据复用。']);
   if(kind==='im2col'){
@@ -148,13 +159,13 @@ function renderOutput(activeDests,commandDests){
     html+=`<span class="matrix-axis" title="输出第 ${row} 行">${row}</span>`;
     for(let col=0;col<model.cols;col++){
       const idx=row*model.cols+col,out=model.output[idx],done=out.from&&out.event<step,zero=!out.from&&model.prezero;
-      const cls=['data-cell',done?'done':zero?'zero':'pending',preview?'preview':'',commandDests.has(idx)&&!done?'command':'',activeDests.has(idx)?'current':'',selection?.type==='dst'&&selection.index===idx?'chosen':''].filter(Boolean).join(' ');
-      const val=zero?'0':done||preview?valueOf(out.from):model.prezero?'0':'·';
-      const status=zero?'外部预置零':done?'已搬入':preview?'最终结果预览':'尚未搬入';
+      const cls=['data-cell',out.untouched?'untouched':done?'done':zero?'zero':'pending',preview?'preview':'',commandDests.has(idx)&&!done?'command':'',activeDests.has(idx)?'current':'',selection?.type==='dst'&&selection.index===idx?'chosen':''].filter(Boolean).join(' ');
+      const val=out.untouched?'—':zero?'0':done||preview?valueOf(out.from):model.prezero?'0':'·';
+      const status=out.untouched?'不写入，原值保持不变':zero?'外部预置零':done?'已搬入':preview?'最终结果预览':'尚未搬入';
       html+=`<button type="button" class="${cls}" data-destination="${idx}" aria-label="输出第${row}行第${col}段，${status}，${val}" title="Y[${row},${col}] · ${status}">${val}</button>`;
     }
   }
-  $('output-grid').innerHTML=`<div class="grid-caption"><span>${kind==='im2col'?'列标题 = 核位置 (r,s)；一格 = C 个通道':'输出 Y · 未搬入的格先留空'}</span></div><div class="matrix-scroll"><div class="data-matrix" style="--cols:${model.cols}">${html}</div></div>`;
+  $('output-grid').innerHTML=`<div class="grid-caption"><span>${kind==='im2col'?'列标题 = 核位置 (r,s)；一格 = C 个通道':kind==='copy'?'目的 Y · — 保持原值；· 表示这段还没搬':'输出 Y · 未搬入的格先留空'}</span></div><div class="matrix-scroll"><div class="data-matrix" style="--cols:${model.cols}">${html}</div></div>`;
   $('matrix-pages').innerHTML=`<button type="button" id="page-prev" aria-label="上一页输出" ${page===0?'disabled':''}>‹</button><span>第 ${first}–${last-1} 行 / 共 ${model.rows} 行</span><button type="button" id="page-next" aria-label="下一页输出" ${page===totalPages-1?'disabled':''}>›</button>`;
   $('page-prev').onclick=()=>{stop();$('follow-page').checked=false;page--;renderFrame(false);};
   $('page-next').onclick=()=>{stop();$('follow-page').checked=false;page++;renderFrame(false);};
@@ -170,7 +181,7 @@ function renderReadout(){
       $('readout').innerHTML=`<div><strong>选中 ${src.source}[${src.row}, ${src.col}]</strong> · 通道 ${lane} 的值是 <code>${valueOf(src)}</code><small>这一整段的首元素字节偏移 ${hex(getSourceByte(src))}；出现在 ${reuse} 个输出位置。</small></div><span class="readout-byte">${model.vector*model.bytes} B / 格</span>`;
     }else{
       const out=model.output[selection.index];
-      $('readout').innerHTML=`<div><strong>选中 Y 第 ${out.row} 行、第 ${out.col} 段</strong><small>${out.from?`来自 ${out.from.source}[${out.from.row}, ${out.from.col}]；由 COPY ${out.event!==undefined?model.events[out.event].command+1:'?'} 写入。`:'这里越界，保持外部预置的 0，不读取输入。'}</small></div><span class="readout-byte">${out.from&&out.event>=step?'待搬入':out.from?valueOf(out.from):'0'}</span>`;
+      $('readout').innerHTML=`<div><strong>选中 Y 第 ${out.row} 行、第 ${out.col} 段</strong><small>${out.from?`来自 ${out.from.source}[${out.from.row}, ${out.from.col}]；由 COPY ${out.event!==undefined?model.events[out.event].command+1:'?'} 写入。`:out.untouched?'此位置不属于本条 COPY，保持原值；没有执行清零。':'这里越界，保持外部预置的 0，不读取输入。'}</small></div><span class="readout-byte">${out.from&&out.event>=step?'待搬入':out.from?valueOf(out.from):out.untouched?'保持原值':'0'}</span>`;
     }
   }else if(step===model.events.length){
     $('readout').innerHTML=`<div><strong>搬运完成。所有有效输出位置都已写入。</strong><small>${model.commands.length} 条 copy · ${model.events.length} 个连续段${model.prezero?' · 越界部分保持预置零':''}。点击任意格查看它的来源。</small></div><span class="readout-byte">${fmt(model.payloadElements*model.bytes)} B</span>`;
@@ -268,4 +279,4 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();});
 window.addEventListener('pagehide',stop);
 rebuild();
 // Public read-only state for reproducible browser checks, not a hardware interface.
-window.copyLab={getState:()=>({kind,config:{...config()},step,playing,commands:model.commands.length,events:model.events.length,rtlOK:model.rtlOK,zeroCount:model.zeroCount,output:model.output.map(o=>({from:o.from?.value??0,event:o.event})),performance:{assumptions:{...costOptions},eligible:metrics.eligible,estimate:metrics.estimate,recommended:comparison.best?.strategy??null,tile:tileScenario(model,costOptions)}})};
+window.copyLab={getState:()=>({kind,config:{...config()},step,playing,commands:model.commands.length,events:model.events.length,rtlOK:model.rtlOK,zeroCount:model.zeroCount,output:model.output.map(o=>({from:o.from?.value??0,event:o.event,untouched:!!o.untouched})),performance:{assumptions:{...costOptions},eligible:metrics.eligible,estimate:metrics.estimate,recommended:comparison.best?.strategy??null,tile:tileScenario(model,costOptions)}})};

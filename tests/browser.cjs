@@ -13,6 +13,19 @@ const base=process.env.TEST_URL||'http://127.0.0.1:8766';
   await page.goto(base,{waitUntil:'networkidle'});
   await page.waitForFunction(()=>window.copyLab);
   const state=()=>page.evaluate(()=>window.copyLab.getState());
+  assert.equal((await state()).kind,'copy');assert.equal((await state()).commands,1);
+  assert.equal(await page.locator('#copy-introduction').isVisible(),true);
+  await page.locator('#experiment').screenshot({path:'.qa/copy-introduction-desktop.png'});
+  await page.locator('#preset').selectOption('1');
+  await page.locator('#preview-result').check();
+  assert.equal(await page.locator('#output-grid .untouched').count(),6);
+  await page.locator('[data-destination="0"]').click();assert.match(await page.locator('#readout').textContent(),/保持原值/);
+  await page.locator('#next').click();assert.equal((await state()).step,1);
+  await page.locator('#preset').selectOption('2');assert.equal((await state()).rtlOK,true);
+  const copyURL=page.url();await page.reload({waitUntil:'networkidle'});assert.equal(page.url(),copyURL);
+  assert.equal((await state()).config.srcCols,6);assert.equal((await state()).config.dstX,1);
+  await page.locator('#preview-result').uncheck();
+  await page.locator('#tab-concat').click();
   assert.equal((await state()).commands,2);
   await page.screenshot({path:'.qa/desktop-concat.png',fullPage:true});
   await page.locator('#next').click();assert.equal((await state()).step,1);
@@ -47,12 +60,13 @@ const base=process.env.TEST_URL||'http://127.0.0.1:8766';
   const permalink=page.url();await page.reload({waitUntil:'networkidle'});assert.equal((await state()).config.vec,128);assert.equal(page.url(),permalink);
   for(const width of [390,320]){
     await page.setViewportSize({width,height:844});
-    for(const op of ['concat','slice','im2col']){
+    for(const op of ['copy','concat','slice','im2col']){
       await page.locator(`#tab-${op}`).click();
       const dimensions=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth}));
       assert(dimensions.scroll<=dimensions.width+1,`${op} has horizontal page overflow at ${width}: ${JSON.stringify(dimensions)}`);
       const invalid=await page.locator('input,select,button').evaluateAll(nodes=>nodes.filter(n=>{const r=n.getBoundingClientRect();if(!r.width||!r.height)return false;const style=getComputedStyle(n);if(style.visibility==='hidden')return false;return !n.closest('.matrix-scroll,.command-list')&&(r.left<-.5||r.right>innerWidth+.5)}).map(n=>n.id||n.textContent));
       assert.deepEqual(invalid,[],`${op} controls overflow at ${width}`);
+      if(op==='copy')await page.locator('#experiment').screenshot({path:`.qa/copy-introduction-${width}.png`});
     }
     await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:`.qa/mobile-${width}.png`,fullPage:true});
   }

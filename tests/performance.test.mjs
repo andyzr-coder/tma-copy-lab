@@ -4,7 +4,7 @@ import {build} from '../engine.mjs';
 import {analyze,compare,countTransfers,endpointSegments,tileScenario} from '../performance.mjs';
 
 test('Narrow unsupported descriptors have no fabricated bus counts or time',()=>{
-  for(const kind of ['concat','slice','im2col']){
+  for(const kind of ['copy','concat','slice','im2col']){
     const comparison=compare(kind,{});
     assert.equal(comparison.best,null);
     for(const {metrics} of comparison.candidates){assert.equal(metrics.eligible,false);assert.equal(metrics.estimate,null);assert.equal(metrics.read,null);}

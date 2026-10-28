@@ -20,7 +20,10 @@ function checkReference(m){
   const c=m.c;
   if(m.error){assert.equal(m.commands.length,0);return;}
   const expected=[];
-  if(m.kind==='concat'){
+  if(m.kind==='copy'){
+    for(let r=0;r<c.rows;r++)for(let col=0;col<c.dstCols;col++)expected.push(col>=c.dstX&&col<c.dstX+c.cols?`A:${r}:${c.srcX+col-c.dstX}`:null);
+    assert.deepEqual(m.output.map(o=>o.untouched),expected.map(x=>x===null));
+  }else if(m.kind==='concat'){
     for(let r=0;r<m.rows;r++)for(let col=0;col<m.cols;col++){
       if(c.axis==='col') expected.push(col<c.a?`A:${r}:${col}`:`B:${r}:${col-c.a}`);
       else expected.push(r<c.a?`A:${r}:${col}`:`B:${r-c.a}:${col}`);
@@ -37,7 +40,7 @@ function checkReference(m){
     }
   }
   assert.deepEqual(m.output.map(o=>o.from?.key??null),expected);
-  if(expected.some(x=>x===null))assert.equal(m.prezero,true,'Padding requires prezero');
+  if(m.kind==='im2col'&&expected.some(x=>x===null))assert.equal(m.prezero,true,'Padding requires prezero');
   checkDescriptors(m);
 }
 
@@ -50,10 +53,17 @@ test('The introductory examples produce two, one and four copies',()=>{
 });
 test('Every displayed vector expands to exactly the descriptor addresses',()=>{
   for(const vec of [1,4,32,128])for(const bytes of [1,2,4]){
+    checkReference(build('copy',{vec,bytes,rows:3,cols:3,srcCols:6,dstCols:5,srcX:2,dstX:1}));
     for(const axis of ['row','col'])checkReference(build('concat',{axis,vec,bytes}));
     for(const sx of [1,2,3])for(const sy of [1,2])checkReference(build('slice',{sx,sy,vec,bytes}));
     for(const strategy of ['kernel','window','row'])checkReference(build('im2col',{vec,bytes,strategy,n:2,ph:1,pw:1,r:3,s:3}));
   }
+});
+test('COPY preserves all unselected destination cells and counts only its selected region',()=>{
+  const m=build('copy',{rows:3,cols:3,srcCols:6,dstCols:5,srcX:1,dstX:1,vec:128});
+  checkReference(m);assert.equal(m.commands.length,1);assert.equal(m.events.length,3);
+  assert.equal(m.payloadElements,9*128);assert.equal(m.output.filter(o=>o.untouched).length,6);
+  assert.equal(m.prezero,false);assert.equal(m.zeroCount,0);assert.equal(m.rtlOK,true);
 });
 test('Independent im2col oracle covers stride, dilation, padding and batch',()=>{
   let seed=284;

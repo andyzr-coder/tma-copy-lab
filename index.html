@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="从零理解 slice、concat、im2col 如何拆成 copy。调整参数，逐段播放数据搬运，保留搬运动画，比较请求、带宽成本、片上分块与 TMA RTL 的对齐边界。">
+  <meta name="description" content="先用 COPY 入门动画学会基础搬运，再理解 concat、slice、im2col 如何拆成 copy。调整参数，逐段播放数据搬运，保留搬运动画，比较请求、带宽成本、片上分块与 TMA RTL 的对齐边界。">
   <meta name="theme-color" content="#173744">
   <title>TMA Copy Lab · 看懂每一次搬运</title>
   <link rel="icon" type="image/svg+xml" href="./icon.svg">
@@ -21,15 +21,16 @@
       <div class="intro-diagram" aria-label="同一份数据通过不同地址映射得到不同结果"><div class="mini-grid"><i>1</i><i>2</i><i>3</i><i>4</i><i>5</i><i>6</i></div><span class="intro-arrow">→<small>地址 + 范围</small></span><div class="mini-grid rearranged"><i>2</i><i>3</i><i>5</i><i>6</i></div><p>数值没有计算，<br>位置发生了变化。</p></div>
     </section>
 
-    <div class="mode-tabs" role="tablist" aria-label="选择要学习的算子">
-      <button class="mode-tab active" type="button" role="tab" aria-selected="true" aria-controls="experiment" id="tab-concat" data-mode="concat"><span class="tab-icon" aria-hidden="true">▥</span><span><b>01 / concat</b><small>把几块数据拼在一起</small></span><span class="tab-arrow">↗</span></button>
+    <div class="mode-tabs" role="tablist" aria-label="先学 COPY，再学三个算子">
+      <button class="mode-tab active" type="button" role="tab" aria-selected="true" aria-controls="experiment" id="tab-copy" data-mode="copy"><span class="tab-icon" aria-hidden="true">▤</span><span><b>00 / copy</b><small>先认识一次基础搬运</small></span><span class="tab-arrow">↗</span></button>
+      <button class="mode-tab" type="button" role="tab" aria-selected="false" aria-controls="experiment" id="tab-concat" data-mode="concat"><span class="tab-icon" aria-hidden="true">▥</span><span><b>01 / concat</b><small>把几块数据拼在一起</small></span><span class="tab-arrow">↗</span></button>
       <button class="mode-tab" type="button" role="tab" aria-selected="false" aria-controls="experiment" id="tab-slice" data-mode="slice"><span class="tab-icon" aria-hidden="true">▣</span><span><b>02 / slice</b><small>从大矩阵中取出一部分</small></span><span class="tab-arrow">↗</span></button>
       <button class="mode-tab" type="button" role="tab" aria-selected="false" aria-controls="experiment" id="tab-im2col" data-mode="im2col"><span class="tab-icon" aria-hidden="true">▧</span><span><b>03 / im2col</b><small>把每个窗口展开成一行</small></span><span class="tab-arrow">↗</span></button>
     </div>
 
-    <section id="experiment" class="experiment" role="tabpanel" aria-labelledby="tab-concat">
+    <section id="experiment" class="experiment" role="tabpanel" aria-labelledby="tab-copy">
       <aside class="config-panel">
-        <div class="panel-kicker">试着改一改</div><h2 id="config-title">拼接参数</h2>
+        <div class="panel-kicker">试着改一改</div><h2 id="config-title">基础 COPY 参数</h2>
         <label class="field preset-field" for="preset"><span>从一个例子开始</span><select id="preset"></select></label>
         <div id="config-fields"></div>
         <details class="storage-config"><summary>每格的实际数据量</summary><p>先用每格 1 个元素理解位置。要检查真实对齐，可切换到“满足对齐的例子”。</p><div id="storage-fields"></div></details>
@@ -37,8 +38,13 @@
         <button class="plain-button" id="reset-params" type="button">↺ 恢复起始例子</button>
       </aside>
       <div class="lab-panel">
-        <div class="lab-top"><div><div class="panel-kicker" id="operation-kicker">CONCAT / 拼接</div><h2 id="operation-title">两个输入，分别写进一个输出</h2></div><span class="model-tag">地址 + 带宽成本模型</span></div>
+        <div class="lab-top"><div><div class="panel-kicker" id="operation-kicker">COPY / 先学基础搬运</div><h2 id="operation-title">从 A 读出来，原样写到 Y</h2></div><span class="model-tag">地址 + 带宽成本模型</span></div>
         <p class="operation-description" id="operation-description"></p>
+        <div id="copy-introduction" class="copy-introduction">
+          <div id="copy-facts" class="copy-facts"></div>
+          <p><strong>先按“播放搬运”：</strong>看一条 COPY 怎样搬完多行。再选“每行只搬一段，两边行距不同”，观察没被选中的位置为何保持原值。下方描述符中的 base 是各自缓冲区内偏移；A 和 Y 是两个独立缓冲区。</p>
+          <details><summary>学会 COPY，怎样接上后面三个算子？</summary><p><strong>concat：</strong>让几条 COPY 写入同一个输出的不同位置。<br><strong>slice：</strong>改变源起点和搬运范围，只取需要的部分。<br><strong>im2col：</strong>按窗口安排重复读取，把数据放到展开矩阵中。</p><p>这里的 copy 指基础搬运动作；实际发给 LD、ST 还是原生 CP，需要看源和目的所在的存储端点。教学小矩阵用于看清位置，对齐示例用于对照硬件规则。</p></details>
+        </div>
         <div id="strategy-control" hidden><span>搬运顺序</span><div class="segmented" role="group" aria-label="im2col 拆分策略"><button type="button" data-strategy="window" aria-pressed="false">按窗口</button><button type="button" data-strategy="kernel" aria-pressed="true">按核位置</button><button type="button" data-strategy="row" aria-pressed="false">核行分组 · 新</button></div><a class="text-link" href="#bandwidth">哪种更划算？↓</a></div>
         <div id="shape-strip" class="shape-strip"></div>
         <div id="empty-state" class="empty-state" hidden role="status"></div>
@@ -49,7 +55,7 @@
             <div class="destination-side"><div class="visual-heading"><h3>写到这里</h3><span id="output-shape"></span></div><div id="output-grid"></div><div class="matrix-pages" id="matrix-pages"></div></div>
             <div id="flight" class="flight" aria-hidden="true"></div>
           </div>
-          <div class="legend"><span><i class="legend-current"></i>这一段正在搬</span><span><i class="legend-command"></i>本条 copy 覆盖范围</span><span><i class="legend-done"></i>已经写入</span><span id="window-legend" hidden><i class="legend-window"></i>当前窗口；斜纹为 dilation 跳过</span><span id="zero-legend" hidden><i class="legend-zero"></i>预先清零，保持为 0</span></div>
+          <div class="legend"><span><i class="legend-current"></i>这一段正在搬</span><span><i class="legend-command"></i>本条 copy 覆盖范围</span><span><i class="legend-done"></i>已经写入</span><span id="untouched-legend" hidden><i class="legend-untouched"></i>— 不写入，保持原值</span><span id="window-legend" hidden><i class="legend-window"></i>当前窗口；斜纹为 dilation 跳过</span><span id="zero-legend" hidden><i class="legend-zero"></i>预先清零，保持为 0</span></div>
           <div class="readout" id="readout" aria-live="polite"></div>
           <div class="playback"><div class="play-buttons"><button type="button" id="restart" aria-label="回到第一段">↺</button><button type="button" id="previous" aria-label="上一段">‹</button><button type="button" id="play" class="primary-button">▶ 播放搬运</button><button type="button" id="next" aria-label="搬运下一段">›</button></div><label class="progress-control" for="progress"><span id="progress-label">已搬 0 / 0 段</span><input type="range" id="progress" min="0" max="1" value="0"></label><label class="speed-control" for="speed">速度<select id="speed"><option value="1500">慢速</option><option value="850" selected>正常</option><option value="350">快速</option></select></label></div>
           <div class="view-controls"><span>一步 = 一段连续数据；一条 copy 可以包含多步。</span><label><input type="checkbox" id="preview-result">预览最终结果</label><label><input type="checkbox" id="follow-page" checked>跟随当前写入行</label></div>
@@ -137,12 +143,12 @@ Y[m,k] = 0              （h,w 越界，由预先清零保留）</pre><p>当 P �
     <section id="limits" class="limits-section">
       <div class="section-heading"><div><p class="eyebrow">理解功能，也理解边界</p><h2>这次做了什么，哪些事还没有做？</h2></div><span class="version-badge">参考 RTL · 64cda546</span></div>
       <p class="section-intro">动画验证“每个元素应该从哪里搬到哪里”。它不是 RTL 仿真；几何检查通过，也不等于完整指令已经在芯片上验证通过。</p>
-      <div class="limits-columns"><article><h3>这次可以探索</h3><ul><li>二维 concat、矩形与正步长 slice，以及 NHWC im2col。</li><li>调整尺寸、通道数、元素宽度、卷积核、stride、dilation、对称 padding 和 batch。</li><li>逐段播放、单步、回退、拖动进度；查看当前 copy 的源/目的范围和描述符。</li><li>对比三种 im2col 拆法；按有效字节、128B 数据拍、端点请求与可调开销给建议。</li><li>按固定 RTL 版本检查线性 CP 的对齐、实际宽度取整和几何边界。</li><li>导出当前描述符，分享带参数的页面地址；所有计算在浏览器本地完成。</li></ul></article><article><h3>不能从动画推断</h3><ul><li>带宽成本是有明确假设的估算。请求模型考虑连续段合并、128B 拍、MIF burst 和 4KB 边界；不模拟流水线时序、反压、排队或 bank conflict，也不代表 RTL 实测性能。</li><li>不实现卷积乘加，也不实现硬件 padding 指令。补零作为独立前置步骤。</li><li>不生成完整 ISA 机器码，不接真实设备，不保证所有端点都接受 CP 字段。</li><li>不覆盖折叠布局、转置、gather/scatter、SWA、量化零点或 4bit 半字节打包。</li><li>假设源目的缓冲区不重叠、已分配且满足真实地址边界；不模拟并发命令；成本模型的基地址页内偏移是可调假设。</li><li>这里只演示正步长 slice；不覆盖负步长反转、不规则索引或全部张量布局。</li></ul></article></div>
+      <div class="limits-columns"><article><h3>这次可以探索</h3><ul><li>基础二维 COPY、二维 concat、矩形与正步长 slice，以及 NHWC im2col。</li><li>调整尺寸、通道数、元素宽度、卷积核、stride、dilation、对称 padding 和 batch。</li><li>逐段播放、单步、回退、拖动进度；查看当前 copy 的源/目的范围和描述符。</li><li>对比三种 im2col 拆法；按有效字节、128B 数据拍、端点请求与可调开销给建议。</li><li>按固定 RTL 版本检查线性 CP 的对齐、实际宽度取整和几何边界。</li><li>导出当前描述符，分享带参数的页面地址；所有计算在浏览器本地完成。</li></ul></article><article><h3>不能从动画推断</h3><ul><li>带宽成本是有明确假设的估算。请求模型考虑连续段合并、128B 拍、MIF burst 和 4KB 边界；不模拟流水线时序、反压、排队或 bank conflict，也不代表 RTL 实测性能。</li><li>不实现卷积乘加，也不实现硬件 padding 指令。补零作为独立前置步骤。</li><li>不生成完整 ISA 机器码，不接真实设备，不保证所有端点都接受 CP 字段。</li><li>不覆盖折叠布局、转置、gather/scatter、SWA、量化零点或 4bit 半字节打包。</li><li>假设源目的缓冲区不重叠、已分配且满足真实地址边界；不模拟并发命令；成本模型的基地址页内偏移是可调假设。</li><li>这里只演示正步长 slice；不覆盖负步长反转、不规则索引或全部张量布局。</li></ul></article></div>
       <div class="rule-table-wrap"><table class="rule-table"><caption>普通 linear→linear CP · 参考提交的关键规则</caption><thead><tr><th>字段 / 情况</th><th>实际行为</th><th>理解时要注意</th></tr></thead><tbody><tr><td>tensor 基地址</td><td>128B 对齐</td><td>网页显示的是缓冲区内偏移，实际物理基地址仍需满足要求。</td></tr><tr><td>源 / 目的 glb0 × E</td><td>256B 对齐</td><td>代码实际检查比规格部分文字中的 128B 更严格。</td></tr><tr><td>源 / 目的 start0 × E</td><td>128B 对齐</td><td>小通道的紧密拼接边界可能无法直接表达。</td></tr><tr><td>CONV 的 box0 × E</td><td>原宽≤64B：取整到64B；其他：取整到256B</td><td>会真的扩大搬运范围；不是自动补零，也不能自动视作正确的尾部掩码。</td></tr><tr><td>MATMUL 的 box0 × E</td><td>取整到256B</td><td>本实验的导出示例统一使用 CONV，允许三维 copy。</td></tr><tr><td>start + 实际 box</td><td>不得超过 global</td><td>取整后的宽度也参与边界检查。</td></tr><tr><td>batch / dim3</td><td>普通 CP core 的 walker 只使用 dim0..2</td><td>本实验在 batch 外层循环更新基地址，不假设原生四维循环。</td></tr></tbody></table></div>
       <div class="channel-note"><h3>图中的 copy，最后应该发给谁？</h3><p>copy 在这里是“基础搬运”的统称。<strong>LD</strong> 把全局存储的数据搬到 L1 tile；<strong>ST</strong> 把 L1 tile 搬到全局存储；原生 <strong>CP</strong> 支持本地 L1→本地 L1、远端 L1→本地 L1、DLB→DLB。截图中的红圈属于 ST，不能把它的指令一律替换成 CP opcode。</p><p>本网站为了统一展示，使用 CP 风格的 src/dst 描述符。实际 LD/ST 需映射到 global tensor 与 L1 tile 两套字段，并检查各自通道的限制。当前参考实现没有独立的 concat/slice/im2col 展开器；可以由上层生成基础搬运序列，或者另加硬件描述符生成状态机。</p></div>
       <details class="formula-details"><summary>展开：拆分依据与参考代码位置</summary><div class="source-links"><p>固定参考提交 <code>64cda54608278fc973be7132cc7f338b699adaeb</code>。下列原仓库链接可能需要访问权限；本教学网站独立公开，不包含原 RTL 或原始规格文件。</p><a href="https://github.com/Reexen-ADA300-TMA/ADA300_TMA/blob/64cda54608278fc973be7132cc7f338b699adaeb/tma_code/code/ada300ps_npu_tma_cp_core.v#L195" target="_blank" rel="noopener">cp_core：源 / 目的子块地址与三维尺寸 ↗</a><a href="https://github.com/Reexen-ADA300-TMA/ADA300_TMA/blob/64cda54608278fc973be7132cc7f338b699adaeb/tma_code/code/ada300ps_npu_tma_pkg.sv#L564" target="_blank" rel="noopener">pkg：256B 行距检查与 box 向上取整 ↗</a><a href="https://github.com/Reexen-ADA300-TMA/ADA300_TMA/blob/64cda54608278fc973be7132cc7f338b699adaeb/tma_code/code/ada300ps_npu_tma_cp_cmd_decode.v#L411" target="_blank" rel="noopener">cp_cmd_decode：基地址、对齐和边界检查 ↗</a><a href="https://github.com/Reexen-ADA300-TMA/ADA300_TMA/blob/64cda54608278fc973be7132cc7f338b699adaeb/tma_code/code/ada300ps_npu_tma_rd_ctrl.v#L489" target="_blank" rel="noopener">rd_ctrl：读端连续行/面合并；L665 起为 L1/MIF 请求拆分 ↗</a><a href="https://github.com/Reexen-ADA300-TMA/ADA300_TMA/blob/64cda54608278fc973be7132cc7f338b699adaeb/tma_code/code/ada300ps_npu_tma_wr_ctrl.v#L439" target="_blank" rel="noopener">wr_ctrl：写端合并；L520 起为 burst 与 4KB 边界限制 ↗</a></div></details>
     </section>
-    <section class="closing"><p>第一次看，建议这样试</p><ol><li>先播放 concat，看 B 为什么写到每行的后半段。</li><li>切换 slice，改动起点，看源行距为什么仍然保留。</li><li>进入 im2col，用“按窗口”看展开，再比较“按核位置”和“核行分组”。</li><li>选择对齐示例，下滑查看带宽比较；改变请求开销，观察推荐是否变化。</li></ol><button type="button" id="share" class="secondary-button">复制当前参数链接 ↗</button><span id="share-status" role="status"></span></section>
+    <section class="closing"><p>第一次看，建议这样试</p><ol><li>先播放 COPY，再选行距不同的例子，看每行搬运量与行距的区别。</li><li>接着播放 concat，看 B 为什么写到每行的后半段。</li><li>切换 slice，改动起点，看源行距为什么仍然保留。</li><li>进入 im2col，用“按窗口”看展开，再比较“按核位置”和“核行分组”。</li><li>选择对齐示例，下滑查看带宽比较；改变请求开销，观察推荐是否变化。</li></ol><button type="button" id="share" class="secondary-button">复制当前参数链接 ↗</button><span id="share-status" role="status"></span></section>
   </main>
   <footer><a class="brand" href="#">TMA <b>Copy Lab</b></a><span>公开的交互教学实验 · 无需登录 · 不上传输入数据</span><a href="https://github.com/andyzr-coder/tma-copy-lab" target="_blank" rel="noopener">查看网站源码 ↗</a></footer>
   <script type="module" src="./app.mjs"></script>

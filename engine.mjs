@@ -1,11 +1,18 @@
 // Exact educational address model. No hardware or machine-code execution.
 export const COMMIT = '64cda54608278fc973be7132cc7f338b699adaeb';
 export const defaults = {
+  copy: {rows:3,cols:4,srcCols:4,dstCols:4,srcX:0,dstX:0,vec:1,bytes:2},
   concat: {axis:'col',common:3,a:3,b:2,vec:1,bytes:2},
   slice: {h:5,w:6,y:1,x:1,oh:3,ow:3,sy:1,sx:1,vec:1,bytes:2},
   im2col: {n:1,h:4,w:4,vec:1,r:2,s:2,sh:1,sw:1,dh:1,dw:1,ph:0,pw:0,bytes:2,strategy:'kernel'}
 };
 export const presets = {
+  copy: [
+    ['一条 COPY，原样搬三行',{...defaults.copy}],
+    ['每行只搬一段，两边行距不同',{...defaults.copy,cols:3,srcCols:6,dstCols:5,srcX:1,dstX:1}],
+    ['满足对齐的例子',{...defaults.copy,cols:3,srcCols:6,dstCols:5,srcX:1,dstX:1,vec:128}],
+    ['先看最简单的一行',{...defaults.copy,rows:1}]
+  ],
   concat: [
     ['左右拼起来',{...defaults.concat}],
     ['上下拼起来',{...defaults.concat,axis:'row',common:4,a:2,b:3}],
@@ -32,7 +39,11 @@ export function normalize(kind, input={}) {
   const c={...defaults[kind],...input};
   c.vec=[1,2,4,8,16,32,64,128].includes(+c.vec)?+c.vec:1;
   c.bytes=[1,2,4].includes(+c.bytes)?+c.bytes:2;
-  if(kind==='concat'){
+  if(kind==='copy'){
+    c.rows=int(c.rows,1,6,3);c.cols=int(c.cols,1,6,4);
+    c.srcCols=int(c.srcCols,c.cols,8,c.cols);c.dstCols=int(c.dstCols,c.cols,8,c.cols);
+    c.srcX=int(c.srcX,0,c.srcCols-c.cols,0);c.dstX=int(c.dstX,0,c.dstCols-c.cols,0);
+  } else if(kind==='concat'){
     c.axis=c.axis==='row'?'row':'col';
     for(const k of ['common','a','b']) c[k]=int(c[k],1,6,3);
   } else if(kind==='slice'){
@@ -103,7 +114,15 @@ export function build(kind, input={}){
     }
     result.commands.push(cmd);
   };
-  if(kind==='concat'){
+  if(kind==='copy'){
+    const A=source('A','源缓冲区 A',c.rows,c.srcCols);init(c.rows,c.dstCols);
+    const segments=Array.from({length:c.rows},(_,row)=>({label:`源第 ${row} 行的 ${c.cols} 格 → 目的第 ${row} 行`,
+      pairs:Array.from({length:c.cols},(_,col)=>({src:A.cells[row*c.srcCols+c.srcX+col],dst:row*c.dstCols+c.dstX+col}))}));
+    addCommand('A → Y · 一条二维 COPY','从两边各自的起点出发，每行原样搬 box0 个元素，再按各自 global0 给出的行距换行。没有搬到的位置保持原值。',
+      descriptor(0,0,[c.srcCols*V,c.rows,1],[c.dstCols*V,c.rows,1],[c.cols*V,c.rows,1],[c.srcX*V,0,0],[c.dstX*V,0,0]),segments,{source:'A'});
+    for(const out of result.output)out.untouched=!out.from;
+    result.explain=`一条 COPY 搬 ${c.rows} 行，每行 ${c.cols} 格，共 ${c.rows*c.cols*V*e}B。源行距 ${c.srcCols*V*e}B，目的行距 ${c.dstCols*V*e}B；行距包含不搬的部分。“—”表示此位置不被写入，不代表填零。`;
+  } else if(kind==='concat'){
     const horizontal=c.axis==='col';
     const A=source('A','输入 A',horizontal?c.common:c.a,horizontal?c.a:c.common);
     const B=source('B','输入 B',horizontal?c.common:c.b,horizontal?c.b:c.common,10000);
