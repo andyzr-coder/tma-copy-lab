@@ -1,4 +1,5 @@
 import {build,defaults,presets,normalize,exportPlan,COMMIT} from './engine.mjs';
+import {performanceDefaults,normalizePerformance,analyze,compare,tileScenario,strategyNames} from './performance.mjs';
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=n=>Number(n).toLocaleString('en-US');
@@ -6,6 +7,8 @@ const tuple=a=>`(${a.join(', ')})`;
 const hex=n=>`0x${n.toString(16).toUpperCase().padStart(4,'0')}`;
 const ROWS_PER_PAGE=6;
 const params=new URLSearchParams(location.search);
+let costOptions=normalizePerformance(Object.fromEntries(Object.keys(performanceDefaults).filter(k=>params.has('perf_'+k)).map(k=>[k,params.get('perf_'+k)])));
+let comparison,metrics;
 let kind=['concat','slice','im2col'].includes(params.get('op'))?params.get('op'):'concat';
 const configs=structuredClone(defaults);
 for(const k of Object.keys(configs[kind]))if(params.has(k))configs[kind][k]=params.get(k);
@@ -39,6 +42,7 @@ function renderConfig(){
 function updateURL(){
   const url=new URL(location.href);url.search='';url.searchParams.set('op',kind);
   for(const [k,v] of Object.entries(config()))url.searchParams.set(k,v);
+  for(const [k,v] of Object.entries(costOptions))url.searchParams.set('perf_'+k,v);
   history.replaceState(null,'',url);
 }
 function rebuild(){
@@ -47,7 +51,7 @@ function rebuild(){
     const active=tab.dataset.mode===kind;tab.classList.toggle('active',active);tab.setAttribute('aria-selected',active);
   }
   $('experiment').setAttribute('aria-labelledby',`tab-${kind}`);
-  renderConfig();renderIntro();renderFrame();updateURL();
+  renderConfig();renderIntro();renderPerformance();renderFrame();updateURL();
 }
 function renderIntro(){
   const titles={concat:['CONCAT / 拼接','两个输入，分别写进一个输出','concat 的意思是拼接。A、B 各保持原来的顺序，写到输出中相邻的位置。输入数据不会做加法。'],slice:['SLICE / 切片','只取需要的部分，放到新矩阵里','slice 的意思是选取一部分。调整源起点、输出大小和取样步长，看看哪些数据被保留、哪些没有搬。'],im2col:['IM2COL / 窗口展开','一个窗口，成为输出的一行','在输入上滑动小窗口，把窗口中的数据按“核行 → 核列 → 通道”排成一行。只搬数据，还没有做卷积计算。']};
@@ -63,8 +67,59 @@ function renderIntro(){
   $('window-legend').hidden=kind!=='im2col';
   $('lane-control').hidden=model.vector===1;$('lane').max=model.vector-1;$('lane').value=0;
   $('lane-caption').textContent=`实际每次搬整个 ${model.vector} 元素段，而非只搬显示的通道。`;
-  const other=kind==='im2col'&&!model.error?build(kind,{...config(),strategy:config().strategy==='kernel'?'window':'kernel'}):null;
-  $('learning-note').innerHTML=model.error?'':`<strong>观察重点：</strong>${model.explain}${other?`<br><strong>两种拆法对照：</strong>当前 ${model.commands.length} 条 copy；${config().strategy==='kernel'?'按窗口':'按核位置'}拆法 ${other.commands.length} 条。两者都搬 ${fmt(model.payloadElements*model.bytes)}B 有效数据；这里没有估算实际耗时。`:''}${model.prezero?'<br><strong>补零是前置步骤：</strong>假设输出已由外部清零，橙色格不会发起越界读取。清零工作量不包含在“有效搬运”中。':''}`;
+  $('learning-note').innerHTML=model.error?'':`<strong>观察重点：</strong>${model.explain}${kind==='im2col'?`<br><strong>三种拆法对照：</strong>当前 ${model.commands.length} 条 copy，均需读、写各 ${fmt(model.payloadElements*model.bytes)}B 有效数据。<a href="#bandwidth">下方比较实际段长度、请求数量和估算成本。</a>`:''}${model.prezero?'<br><strong>补零是前置步骤：</strong>假设整块输出已由外部清零，橙色格不会发起越界读取。清零未计入上方有效搬运，下方成本单独计入。':''}`;
+}
+const bytesLabel=n=>n>=1024?`${(n/1024).toFixed(n%1024?2:0)} KiB`:`${fmt(n)} B`;
+const timeLabel=n=>n>=1000?`${(n/1000).toFixed(2)} μs`:`${n.toFixed(1)} ns`;
+function renderPerformance(){
+  costOptions=normalizePerformance(costOptions);
+  for(const input of document.querySelectorAll('[data-cost]'))input.value=costOptions[input.dataset.cost];
+  comparison=compare(kind,config(),costOptions);metrics=analyze(model,costOptions);
+  const m=metrics,best=comparison.best;
+  const card=(label,value,note)=>`<div class="cost-stat"><span>${label}</span><b>${value}</b><small>${note}</small></div>`;
+  $('cost-summary').innerHTML=card('逻辑读 / 写',`${bytesLabel(m.logicalRead)} / ${bytesLabel(m.logicalWrite)}`,`另加整块清零 ${bytesLabel(m.zeroBytes)}；输出 ${bytesLabel(m.outputBytes)}`)+
+    card('总线数据拍占用',m.estimate?bytesLabel(m.estimate.capacity):'—',m.estimate?`含清零；有效字节占比 ${(m.estimate.efficiency*100).toFixed(1)}%`:'当前描述符不能原样执行，不估算拍占用')+
+    card('输入重复读取',`${m.reuse.toFixed(2)} ×`,`被使用的不同输入共 ${bytesLabel(m.uniqueInputBytes)}；无跨窗口缓存`)+
+    card('当前方案估算成本',m.estimate?timeLabel(m.estimate.totalNs):'不参与排名',m.estimate?'数据项 + 假设不可隐藏开销；非实测':'先满足对齐、尺寸和边界条件');
+  if(model.error)$('cost-verdict-copy').innerHTML='<strong>没有输出窗口。</strong><p>调整参数后再比较搬运成本。</p>';
+  else if(!model.commands.length)$('cost-verdict-copy').innerHTML=`<strong>输出全部来自 padding，无需读取输入。</strong><p>仍需由外部准备 ${bytesLabel(m.zeroBytes)} 的零；普通 COPY 不会自动生成零。本页不给清零单独排名。</p>`;
+  else if(!best)$('cost-verdict-copy').innerHTML='<strong>当前没有通过所列 CP 检查的候选，不能推荐“最快方案”。</strong><p>先看下方 RTL 检查。小通道、窄切片或拼接边界可能不满足取整与对齐；可选择对齐示例学习成本，真实任务需要合适的数据布局或另一个支持精细读写的实现，不能直接多搬相邻数据。</p>';
+  else {
+    const selected=kind!=='im2col'||best.strategy===config().strategy;
+    const saving=m.estimate?m.estimate.totalNs-best.metrics.estimate.totalNs:0;
+    $('cost-verdict-copy').innerHTML=`<div><strong>当前假设下建议：${esc(best.name)}</strong><p>${selected?'当前已经选择此候选。':`此候选估算为 ${timeLabel(best.metrics.estimate.totalNs)}${saving>0?`，比当前少 ${timeLabel(saving)}`:''}。`}仅在所列候选与假设内比较；改变端点或开销可能改变排序。${kind!=='im2col'?'连续行/面的合并已按 RTL 计入，无需为了减少请求重复做一维扁平化。':''}</p></div>`;
+
+  }
+  $('apply-recommended').hidden=kind!=='im2col'||!best;
+  $('apply-recommended').disabled=!best||best.strategy===config().strategy;
+  $('apply-recommended').textContent=best?.strategy===config().strategy?'已使用建议方案':'应用建议，并在上方播放 ↑';
+  const range=xs=>xs.length?xs.length===1?`${fmt(xs[0])}B`:`${fmt(xs[0])}–${fmt(xs.at(-1))}B`:'—';
+  $('cost-comparison').innerHTML=`<table class="cost-table"><caption>每个候选独立生成、检查和统计；请求列只计 COPY，清零单列说明，成本包含清零。</caption><thead><tr><th>拆分方案</th><th>指令 / 动画段</th><th>每段有效长度</th><th>合并后段数<br>读 / 写</th><th>端点请求数<br>读 / 写</th><th>估算成本</th><th>静态检查</th></tr></thead><tbody>${comparison.candidates.map(c=>{
+    const x=c.metrics,active=kind!=='im2col'||c.strategy===config().strategy;
+    return `<tr class="${active?'cost-selected':''}"><th>${esc(c.name)}${active?'<small>当前动画</small>':''}${best?.strategy===c.strategy?'<small class="cost-best">当前假设下最低</small>':''}</th><td>${c.model.commands.length} / ${c.model.events.length}</td><td>${range(x.segmentWidths)}</td><td>${x.commands.reduce((n,a)=>n+a.readSegments,0)} / ${x.commands.reduce((n,a)=>n+a.writeSegments,0)}<small>逻辑地址合并</small></td><td>${x.eligible?`${x.read.requests} / ${x.write.requests}`:'—'}</td><td>${x.estimate?timeLabel(x.estimate.totalNs):'—'}</td><td>${x.eligible?'通过所列检查':c.model.commands.length?'不能原样下发':'无 COPY'}</td></tr>`;
+  }).join('')}</tbody></table><p class="cost-footnote">${m.zeroBytes?`清零额外写 ${bytesLabel(m.zeroBytes)}，按一个连续外部写操作估算为 ${m.zero.beats} 拍、${m.zero.requests} 个写请求。`:''}<strong>通过的是 CP 风格地址检查；LD/ST 端点字段映射尚未生成和验证。</strong>64B 有效行仍占 128B 数据拍。有效字节占比不是整体硬件利用率；即使达到 100%，也可能有等待和重复读取。</p>`;
+  const advice=[];const c=config();
+  if(kind==='concat')advice.push(c.axis==='row'?['上下拼接：两侧都连续','当前每个输入在源和目的中都占连续区域；控制器会自动合并连续行。主要成本是完整读取和写入各一次，继续减少描述符维度通常无额外带宽收益。']:['左右拼接：读端连续，写端分段','A、B 的源各自连续，目的每行中间要留出另一输入的位置。行越窄，请求和对齐越重要；如果生产者可直接写最终输出位置，可省去一次拼接搬运，但这需要上层接口配合。']);
+  if(kind==='slice')advice.push(c.sx>1?['隔列切片：窄段是主要限制','只搬选中的列可以减少有效字节，但每个窄段仍可能占一整拍，且当前 RTL 可能无法精确执行。整块先搬到片上再筛选是另一个架构选项，会多读数据，需要比较取样密度与片上重排成本。']:['连续切片：优先保留长行','整行连续时可自动合并；只切出行中一小段时，源端行之间仍有空隙。行步长改变地址间距，不会自动创造数据复用。']);
+  if(kind==='im2col'){
+    advice.push(['先看真实 C × 元素字节数',`当前每像素 ${c.vec*c.bytes}B。通道较少时按核位置产生窄段；核行分组能在连续核列之间加宽，但仍须通过对齐检查。改变 C 会改变任务，不是免费的填充优化。`]);
+    advice.push(c.dw>1?['横向 dilation：不能把空洞也写进去','相邻核位置的源地址不连续，核行分组退化为单格段。更宽的源读取需要片上筛选/重排，普通连续 COPY 不会自动丢弃空洞。']:['核行连续：比较请求数与启动开销','核行分组可一次搬多个核位置。重叠窗口按 q 的余数分组，保证源行距不小于搬运宽度；它可能减少 MIF 请求，也可能比按核位置使用更多指令。']);
+    if(c.ph||c.pw)advice.push(['有 padding：边缘与内部成本不同','边缘有效段缩短，会产生更多分组；整个输出预先清零再覆盖有效位置，增加写流量。只清零边界或在片上生成零可能更省，但本版没有生成这样的清零指令。']);
+    if(c.sh>1||c.sw>1)advice.push(['stride 大：少重叠，也可能少连续','输出更少、输入复用机会通常变小；固定核位置方案在本模型降为按输出行的二维 COPY。核行分组是否更好，取决于有效段长度、源行距与端点请求。']);
+    advice.push(['重复读很多：看下面的片上分块对照',`当前有效输入被平均读取 ${m.reuse.toFixed(2)} 次。三种 COPY 拆法不减少这个逻辑重复量；需要输入驻留片上并配合计算消费，才能改变外存流量。`]);
+  }
+  $('case-advice').innerHTML=advice.map(([title,text])=>`<article><h4>${title}</h4><p>${text}</p></article>`).join('');
+  $('tile-panel').hidden=kind!=='im2col';const tile=tileScenario(model,costOptions);
+  if(tile){
+    const max=Math.max(1,tile.baselineBytes,tile.readBytes);
+    const bar=(label,value,cls)=>`<div class="traffic-row"><span>${label}</span><div class="traffic-track"><i class="${cls}" style="width:${value/max*100}%"></i></div><b>${bytesLabel(value)}</b></div>`;
+    $('tile-result').innerHTML=`<div class="tile-status ${tile.fits?'fits':'too-large'}"><strong>${tile.fits?'容量可容纳这个假设方案':'空间不足，当前分块不可采用'}</strong><span>${tile.tiles} 块 · 峰值 ${bytesLabel(tile.peakBytes)} / 可用 ${bytesLabel(tile.capacityBytes)}</span></div>${bar('完整展开后写回、再读',tile.baselineBytes,'baseline')}${bar('片上展开并直接消费',tile.readBytes,'fused')}<p class="cost-footnote">${tile.fits?'容量检查通过仍不代表执行实现已经存在。':'请减小窗口分块或增加可用空间。'}矩形加载可能包含未使用的输入，因此 stride / dilation 较大时，分块并不总是减少输入读取。两条柱只比较上述外存假设，与上方 L1/MIF 端点配置分开。</p>`;
+  }else $('tile-result').innerHTML='<p>当前没有输出窗口，无法计算分块。</p>';
+  renderCommandCost();
+}
+function renderCommandCost(){
+  const cmd=currentCommand(),cost=metrics?.commands[cmd?.id];
+  $('command-cost').innerHTML=metrics?.eligible&&cost?`<strong>跟随动画 · COPY ${cmd.id+1}</strong><span>读：${cost.read.segments} 个合并段 → ${cost.read.beats} 拍 / ${cost.read.requests} 请求</span><span>写：${cost.write.segments} 个合并段 → ${cost.write.beats} 拍 / ${cost.write.requests} 请求</span><small>动画一步是逻辑连续段，不是总线一拍；这里统计本条指令的全部请求。</small>`:'<strong>保留地址动画，暂不展示本条指令的硬件请求数。</strong><span>只有完整候选通过所列检查后才启用请求和成本估算。</span>';
 }
 function getSourceByte(src){return (kind==='im2col'?src.value-1:src.element)*model.bytes;}
 function valueOf(src){return src.value+lane;}
@@ -159,7 +214,7 @@ function renderFrame(follow=true){
   const cmdEvents=cmd?model.events.slice(cmd.first,cmd.first+cmd.count):[];
   renderSources(new Set(activePairs.map(p=>p.src.key)),new Set(cmdEvents.flatMap(e=>e.pairs.map(p=>p.src.key))));
   if(!model.error)renderOutput(new Set(activePairs.map(p=>p.dst)),new Set(cmdEvents.flatMap(e=>e.pairs.map(p=>p.dst))));
-  renderReadout();renderCommands();renderRTL();
+  renderReadout();renderCommands();renderRTL();renderCommandCost();
   $('progress').max=model.events.length||1;$('progress').value=step;
   $('progress-label').textContent=`已搬 ${step} / ${model.events.length} 段`;
   $('previous').disabled=step===0;$('next').disabled=step>=model.events.length;
@@ -198,8 +253,11 @@ $('speed').onchange=()=>{if(playing){clearTimeout(timer);animate();}};
 $('preview-result').onchange=()=>renderFrame(false);
 $('follow-page').onchange=()=>renderFrame();
 $('lane').oninput=()=>{lane=+$('lane').value;renderFrame(false);};
+$('apply-recommended').onclick=()=>{if(!comparison.best||kind!=='im2col')return;config().strategy=comparison.best.strategy;currentPreset=-1;rebuild();$('visual-area').scrollIntoView({behavior:'smooth',block:'center'});playing=true;animate();};
+for(const input of document.querySelectorAll('[data-cost]'))input.onchange=()=>{costOptions[input.dataset.cost]=input.value;renderPerformance();updateURL();};
 $('download-plan').onclick=()=>{
-  const blob=new Blob([JSON.stringify(exportPlan(model),null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');
+  const report={...exportPlan(model),performance:{warning:'Static request model and user-supplied cost assumptions, not RTL timing or executable LD/ST. Invalid candidates are excluded from ranking.',assumptions:costOptions,current:metrics,candidates:comparison.candidates.map(c=>({strategy:c.strategy,commands:c.model.commands.length,metrics:c.metrics})),recommendedStrategy:comparison.best?.strategy??null,tileArchitectureOnly:tileScenario(model,costOptions)}};
+  const blob=new Blob([JSON.stringify(report,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');
   a.href=url;a.download=`${kind}-copy-plan.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);
 };
 $('share').onclick=async()=>{
@@ -210,4 +268,4 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();});
 window.addEventListener('pagehide',stop);
 rebuild();
 // Public read-only state for reproducible browser checks, not a hardware interface.
-window.copyLab={getState:()=>({kind,config:{...config()},step,playing,commands:model.commands.length,events:model.events.length,rtlOK:model.rtlOK,zeroCount:model.zeroCount,output:model.output.map(o=>({from:o.from?.value??0,event:o.event}))})};
+window.copyLab={getState:()=>({kind,config:{...config()},step,playing,commands:model.commands.length,events:model.events.length,rtlOK:model.rtlOK,zeroCount:model.zeroCount,output:model.output.map(o=>({from:o.from?.value??0,event:o.event})),performance:{assumptions:{...costOptions},eligible:metrics.eligible,estimate:metrics.estimate,recommended:comparison.best?.strategy??null,tile:tileScenario(model,costOptions)}})};

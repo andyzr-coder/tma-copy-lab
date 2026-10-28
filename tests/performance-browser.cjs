@@ -1,0 +1,67 @@
+const {chromium}=require('playwright');
+const assert=require('node:assert/strict');
+const fs=require('node:fs/promises');
+const base=process.env.TEST_URL||'http://127.0.0.1:8766';
+(async()=>{
+  const browser=await chromium.launch({headless:true,...(process.env.BROWSER_EXECUTABLE?{executablePath:process.env.BROWSER_EXECUTABLE}:{}),args:['--disable-gpu']});
+  const context=await browser.newContext({viewport:{width:1440,height:1100},deviceScaleFactor:1});
+  const page=await context.newPage(),errors=[];
+  page.on('pageerror',e=>errors.push(String(e)));
+  await fs.mkdir('.qa',{recursive:true});
+  const state=()=>page.evaluate(()=>window.copyLab.getState());
+  const change=async(id,value)=>{const el=page.locator('#'+id);if(await el.evaluate(n=>n.tagName==='SELECT'))await el.selectOption(value);else{await el.fill(value);await el.dispatchEvent('change');}};
+  await page.goto(base+'/?op=im2col',{waitUntil:'networkidle'});
+  assert.equal((await state()).performance.recommended,null);
+  assert.equal((await state()).performance.estimate,null);
+  await page.locator('[data-strategy="row"]').click();assert.equal((await state()).commands,12);
+  await page.locator('#next').click();assert.equal((await state()).step,1);
+  await page.goto(base+'/?op=im2col&vec=128',{waitUntil:'networkidle'});
+  assert.equal((await state()).performance.recommended,'kernel');
+  await page.locator('#bandwidth').scrollIntoViewIfNeeded();
+  await page.locator('#bandwidth').screenshot({path:'.qa/performance-desktop.png'});
+  await page.locator('.cost-assumptions summary').click();
+  await change('perf-ports','mif-mif');await change('perf-commandNs','0');await change('perf-requestNs','100');
+  assert.equal((await state()).performance.recommended,'row');
+  const before=(await state()).performance.estimate.totalNs;
+  await page.locator('#apply-recommended').click();
+  assert.equal((await state()).config.strategy,'row');assert.equal((await state()).playing,true);
+  await page.waitForTimeout(1100);await page.locator('#play').click();
+  assert((await state()).step>=1);assert.equal((await state()).playing,false);
+  assert((await state()).performance.estimate.totalNs<before);
+  assert.match(await page.locator('#command-cost').textContent(),/请求/);
+  await change('perf-tileP','3');await change('perf-tileQ','3');await change('perf-sramKiB','1');
+  assert.equal((await state()).performance.tile.fits,false);
+  assert.match(await page.locator('#tile-result').textContent(),/空间不足/);
+  await change('perf-srcPage','3968');await change('perf-dstPage','128');
+  const snapshot=(await state()).performance.assumptions;
+  await page.reload({waitUntil:'networkidle'});
+  assert.deepEqual((await state()).performance.assumptions,snapshot);assert.equal((await state()).config.strategy,'row');
+  const downloading=page.waitForEvent('download');await page.locator('#download-plan').click();
+  const download=await downloading;await download.saveAs('.qa/bandwidth-report.json');
+  const report=JSON.parse(await fs.readFile('.qa/bandwidth-report.json','utf8'));
+  assert.equal(report.performance.assumptions.srcPage,3968);
+  assert.equal(report.performance.candidates.length,3);assert.equal(report.performance.tileArchitectureOnly.fits,false);
+  for(const width of [390,320]){
+    await page.setViewportSize({width,height:844});
+    await page.locator('.cost-assumptions summary').click();
+    for(const kind of ['concat','slice','im2col']){
+      await page.locator('#tab-'+kind).click();
+      const size=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth}));
+      assert(size.scroll<=size.width+1,`${kind} overflow at ${width}`);
+      const bad=await page.locator('[data-cost],#apply-recommended').evaluateAll(ns=>ns.filter(n=>{const r=n.getBoundingClientRect();return r.width&&r.height&&(r.left<0||r.right>innerWidth+1)}).map(n=>n.id));
+      assert.deepEqual(bad,[]);
+    }
+    await page.locator('#bandwidth').screenshot({path:`.qa/performance-mobile-${width}.png`});
+    await page.locator('.cost-assumptions summary').click();
+  }
+  await page.goto(base+'/?op=im2col&vec=128&h=4&w=7&r=1&s=3&sw=3',{waitUntil:'networkidle'});
+  assert.equal((await state()).performance.recommended,'row');
+  await page.locator('[data-strategy="row"]').click();assert.equal((await state()).commands,4);
+  await page.locator('#preview-result').check();await page.locator('#experiment').screenshot({path:'.qa/grouped-animation.png'});
+  await page.goto(base+'/?op=im2col&h=2&w=2&r=2&s=2&dh=3&dw=3&ph=1&pw=1',{waitUntil:'networkidle'});
+  assert.equal((await state()).performance.recommended,null);assert.equal((await state()).performance.tile.readBytes,0);
+  assert.match(await page.locator('#cost-verdict').textContent(),/全部来自 padding/);
+  assert.deepEqual(errors,[]);
+  await browser.close();
+  console.log('PASS: cost-based strategy selection, animation, assumptions, page offsets, SRAM limit, export, URL restore, edge cases and mobile layouts.');
+})().catch(error=>{console.error(error);process.exitCode=1;});

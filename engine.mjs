@@ -22,7 +22,9 @@ export const presets = {
     ['边界补零',{...defaults.im2col,r:3,s:3,ph:1,pw:1}],
     ['步长 stride=2',{...defaults.im2col,h:5,w:5,r:3,s:3,sh:2,sw:2,ph:1,pw:1}],
     ['空洞 dilation=2',{...defaults.im2col,h:5,w:5,dh:2,dw:2}],
-    ['对齐后，4 条 copy',{...defaults.im2col,vec:128}]
+    ['对齐后，4 条 copy',{...defaults.im2col,vec:128}],
+    ['长核行 + stride=3，比较带宽',{...defaults.im2col,h:4,w:7,r:1,s:3,sw:3,vec:128,strategy:'row'}],
+    ['C=64：比较哪些拆法通过检查',{...defaults.im2col,vec:64}]
   ]
 };
 const int=(v,min,max,f)=>Math.max(min,Math.min(max,Number.isFinite(+v)?Math.round(+v):f));
@@ -44,7 +46,7 @@ export function normalize(kind, input={}) {
     for(const k of ['r','s','sh','sw']) c[k]=int(c[k],1,3,1);
     for(const k of ['dh','dw']) c[k]=int(c[k],1,3,1);
     for(const k of ['ph','pw']) c[k]=int(c[k],0,2,0);
-    c.strategy=c.strategy==='window'?'window':'kernel';
+    c.strategy=['window','row','kernel'].includes(c.strategy)?c.strategy:'kernel';
   }
   return c;
 }
@@ -166,6 +168,38 @@ export function build(kind, input={}){
           }
         }
       }
+    } else if(c.strategy==='row') {
+      // Group non-overlapping window-row segments into a strided 2D copy.
+      // q residues ensure source pitch >= box0; padding/dilation split groups.
+      for(let n=0;n<c.n;n++)for(let p=0;p<P;p++)for(let r=0;r<c.r;r++){
+        const groups=new Map();
+        for(let q=0;q<Q;q++){
+          const valid=[];
+          for(let s=0;s<c.s;s++){const v=pair(n,p,q,r,s);if(v)valid.push({s,pair:v});}
+          if(!valid.length)continue;
+          for(const chunk of c.dw===1?[valid]:valid.map(v=>[v])){
+            const s=chunk[0].s,length=chunk.length,gap=Math.ceil(length/c.sw);
+            const key=`${s}:${length}:${q%gap}`;
+            if(!groups.has(key))groups.set(key,[]);
+            groups.get(key).push({n,p,q,r,s,gap,pairs:chunk.map(v=>v.pair),label:`窗口 (${p},${q}) · 核行 ${r} 的连续 ${length} 格`});
+          }
+        }
+        for(const group of groups.values()){
+          const runs=[];
+          for(const event of group){
+            const last=runs.at(-1);
+            if(last&&event.q-last.at(-1).q===event.gap)last.push(event);else runs.push([event]);
+          }
+          for(const segments of runs){
+            const first=segments[0],length=first.pairs.length,src=first.pairs[0].src;
+            const width=length*V,srcPitch=first.gap*c.sw*V,dstPitch=first.gap*K;
+            addCommand(`核行 ${r} · 输出行 ${p} · q=${first.q}${segments.length>1?` 每隔 ${first.gap}`:''}${c.n>1?' · N'+n:''}`,
+              `每段一起搬 ${length} 个相邻核位置。窗口按 q 的余数组合，源行距至少容纳整段；减少窄段，不承诺指令数最少。`,
+              descriptor((src.value-1)*e,first.pairs[0].dst*V*e,[srcPitch,segments.length,1],[dstPitch,segments.length,1],[width,segments.length,1]),
+              segments,{source:`X${n}`,n,p,r,s:first.s,method:'核行分组'});
+          }
+        }
+      }
     } else {
       for(let n=0;n<c.n;n++)for(let p=0;p<P;p++)for(let q=0;q<Q;q++)for(let r=0;r<c.r;r++){
         const valid=[];
@@ -181,7 +215,7 @@ export function build(kind, input={}){
       }
     }
     result.zeroCount=result.output.filter(o=>!o.from).length;
-    result.explain=c.strategy==='window'?'按窗口逐行搬，最贴近“截取一个窗口、排成一行”的直觉。同一源像素可被重复读取。':
+    result.explain=c.strategy==='row'?'把相邻核位置合成较宽的段，再把互不重叠的窗口行组合成二维 copy。padding 边缘单独分组，横向 dilation 有空洞时拆成单格；逻辑搬运量保持不变。':c.strategy==='window'?'按窗口逐行搬，最贴近“截取一个窗口、排成一行”的直觉。同一源像素可被重复读取。':
       c.sh===1&&c.sw===1?'按核位置成批搬。步长为 1 时，有效窗口形成矩形，可以用三维 copy；padding 部分保持预置的零。':'步长大于 1：本方案降为二维 copy，并在输出行边界拆开，不假设硬件有独立的任意面距。';
   }
   result.payloadElements=result.events.reduce((n,event)=>n+event.pairs.length*V,0);

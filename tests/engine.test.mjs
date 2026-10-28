@@ -52,7 +52,7 @@ test('Every displayed vector expands to exactly the descriptor addresses',()=>{
   for(const vec of [1,4,32,128])for(const bytes of [1,2,4]){
     for(const axis of ['row','col'])checkReference(build('concat',{axis,vec,bytes}));
     for(const sx of [1,2,3])for(const sy of [1,2])checkReference(build('slice',{sx,sy,vec,bytes}));
-    for(const strategy of ['kernel','window'])checkReference(build('im2col',{vec,bytes,strategy,n:2,ph:1,pw:1,r:3,s:3}));
+    for(const strategy of ['kernel','window','row'])checkReference(build('im2col',{vec,bytes,strategy,n:2,ph:1,pw:1,r:3,s:3}));
   }
 });
 test('Independent im2col oracle covers stride, dilation, padding and batch',()=>{
@@ -60,11 +60,22 @@ test('Independent im2col oracle covers stride, dilation, padding and batch',()=>
   const rnd=(a,b)=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return a+seed%(b-a+1);};
   for(let i=0;i<240;i++){
     const cfg={n:rnd(1,2),h:rnd(2,7),w:rnd(2,7),r:rnd(1,3),s:rnd(1,3),sh:rnd(1,3),sw:rnd(1,3),dh:rnd(1,3),dw:rnd(1,3),ph:rnd(0,2),pw:rnd(0,2),vec:i%12===0?128:1,bytes:2};
-    const kernel=build('im2col',{...cfg,strategy:'kernel'}),window=build('im2col',{...cfg,strategy:'window'});
-    checkReference(kernel);checkReference(window);
+    const kernel=build('im2col',{...cfg,strategy:'kernel'}),window=build('im2col',{...cfg,strategy:'window'}),row=build('im2col',{...cfg,strategy:'row'});
+    checkReference(kernel);checkReference(window);checkReference(row);
     assert.deepEqual(kernel.output.map(o=>o.from?.key??null),window.output.map(o=>o.from?.key??null));
     assert.equal(kernel.payloadElements,window.payloadElements);
+    assert.deepEqual(kernel.output.map(o=>o.from?.key??null),row.output.map(o=>o.from?.key??null));
+    assert.equal(kernel.payloadElements,row.payloadElements);
   }
+});
+test('Grouped window rows retain overlap while allowing wider legal copies',()=>{
+  const overlap=build('im2col',{vec:128,strategy:'row'});
+  checkReference(overlap);assert.equal(overlap.rtlOK,true);
+  assert.equal(overlap.commands.length,12);assert.equal(overlap.events.length,18);
+  for(const cmd of overlap.commands)assert(cmd.desc.srcGlb[0]>=cmd.desc.box[0]);
+  const wide=build('im2col',{h:4,w:7,r:1,s:3,sw:3,vec:128,strategy:'row'});
+  checkReference(wide);assert.equal(wide.rtlOK,true);assert.equal(wide.commands.length,4);
+  assert(wide.commands.every(c=>c.desc.box[0]*wide.bytes===768));
 });
 test('RTL screen distinguishes exact teaching lengths from rounded transfer widths',()=>{
   for(const kind of Object.keys(defaults)){
