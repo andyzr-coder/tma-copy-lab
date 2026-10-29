@@ -3,8 +3,8 @@ export const COMMIT = '64cda54608278fc973be7132cc7f338b699adaeb';
 export const defaults = {
   copy: {rows:3,cols:4,srcCols:4,dstCols:4,srcX:0,dstX:0,vec:1,bytes:2},
   concat: {axis:'col',common:3,a:3,b:2,vec:1,bytes:2},
-  slice: {h:5,w:6,y:1,x:1,oh:3,ow:3,sy:1,sx:1,vec:1,bytes:2},
-  im2col: {n:1,h:4,w:4,vec:1,r:2,s:2,sh:1,sw:1,dh:1,dw:1,ph:0,pw:0,bytes:2,strategy:'kernel'}
+  slice: {h:4,w:8,depth:1,y:0,x:0,z:0,oh:2,ow:2,od:1,ny:2,nx:4,nz:1,sy:2,sx:2,sz:1,order:'120',vec:1,bytes:2},
+  im2col: {n:1,h:4,w:4,vec:1,r:2,s:2,sh:1,sw:1,dh:1,dw:1,ph:0,pw:0,bytes:2,strategy:'window'}
 };
 export const presets = {
   copy: [
@@ -19,17 +19,18 @@ export const presets = {
     ['满足对齐的例子',{...defaults.concat,vec:128}]
   ],
   slice: [
-    ['切出中间一块',{...defaults.slice}],
-    ['每隔一行取数据',{...defaults.slice,h:6,w:5,y:0,x:1,oh:3,ow:3,sy:2}],
-    ['每隔一列取数据',{...defaults.slice,h:4,w:6,y:0,x:0,oh:3,ow:3,sx:2}],
-    ['满足对齐的例子',{...defaults.slice,vec:128}]
+    ['大矩阵切成 8 块 · 先向右',{...defaults.slice}],
+    ['同样 8 块 · 先向下',{...defaults.slice,order:'210'}],
+    ['三维切成 16 块',{...defaults.slice,depth:4,od:2,nz:2,sz:2}],
+    ['满足对齐的例子',{...defaults.slice,vec:128}],
+    ['块之间留间隔',{...defaults.slice,h:6,w:8,ny:2,nx:3,sy:3,sx:3}]
   ],
   im2col: [
     ['2×2 核，从这里开始',{...defaults.im2col}],
     ['边界补零',{...defaults.im2col,r:3,s:3,ph:1,pw:1}],
     ['步长 stride=2',{...defaults.im2col,h:5,w:5,r:3,s:3,sh:2,sw:2,ph:1,pw:1}],
     ['空洞 dilation=2',{...defaults.im2col,h:5,w:5,dh:2,dw:2}],
-    ['对齐后，4 条 copy',{...defaults.im2col,vec:128}],
+    ['对齐示例 · 逐行填完输出',{...defaults.im2col,vec:128}],
     ['长核行 + stride=3，比较带宽',{...defaults.im2col,h:4,w:7,r:1,s:3,sw:3,vec:128,strategy:'row'}],
     ['C=64：比较哪些拆法通过检查',{...defaults.im2col,vec:64}]
   ]
@@ -47,17 +48,20 @@ export function normalize(kind, input={}) {
     c.axis=c.axis==='row'?'row':'col';
     for(const k of ['common','a','b']) c[k]=int(c[k],1,6,3);
   } else if(kind==='slice'){
-    c.h=int(c.h,2,7,5); c.w=int(c.w,2,7,6);
-    c.y=int(c.y,0,c.h-1,0); c.x=int(c.x,0,c.w-1,0);
-    c.sy=int(c.sy,1,3,1); c.sx=int(c.sx,1,3,1);
-    c.oh=int(c.oh,1,Math.floor((c.h-1-c.y)/c.sy)+1,2);
-    c.ow=int(c.ow,1,Math.floor((c.w-1-c.x)/c.sx)+1,2);
+    c.h=int(c.h,2,8,4); c.w=int(c.w,2,8,8); c.depth=int(c.depth,1,4,1);
+    for(const [extent,start,size,stride,count] of [['h','y','oh','sy','ny'],['w','x','ow','sx','nx'],['depth','z','od','sz','nz']]){
+      c[start]=int(c[start],0,c[extent]-1,0);
+      c[size]=int(c[size],1,c[extent]-c[start],1);
+      c[stride]=int(c[stride],1,c[extent],c[size]);
+      c[count]=int(c[count],1,Math.floor((c[extent]-c[start]-c[size])/c[stride])+1,1);
+    }
+    c.order=['012','021','102','120','201','210'].includes(String(c.order))?String(c.order):'120';
   } else {
     c.n=int(c.n,1,2,1); c.h=int(c.h,2,7,4); c.w=int(c.w,2,7,4);
     for(const k of ['r','s','sh','sw']) c[k]=int(c[k],1,3,1);
     for(const k of ['dh','dw']) c[k]=int(c[k],1,3,1);
     for(const k of ['ph','pw']) c[k]=int(c[k],0,2,0);
-    c.strategy=['window','row','kernel'].includes(c.strategy)?c.strategy:'kernel';
+    c.strategy=['window','row','kernel'].includes(c.strategy)?c.strategy:'window';
   }
   return c;
 }
@@ -138,19 +142,44 @@ export function build(kind, input={}){
     }
     result.explain=horizontal?'每个输入一条二维 copy。读端按自己的行距前进，写端按拼接后整行的行距前进。':'每个输入一条 copy。B 的目的行坐标从 A 的高度开始，A 和 B 的列数保持相同。';
   } else if(kind==='slice'){
-    const A=source('A','原始矩阵 A',c.h,c.w); init(c.oh,c.ow);
-    const makeSegment=(row,cols)=>({label:`源第 ${c.y+row*c.sy} 行 → 输出第 ${row} 行`,pairs:cols.map(col=>({src:A.cells[(c.y+row*c.sy)*c.w+c.x+col*c.sx],dst:row*c.ow+col}))});
-    if(c.sx===1){
-      const desc=c.sy===1?descriptor(0,0,[c.w*V,c.h,1],[c.ow*V,c.oh,1],[c.ow*V,c.oh,1],[c.x*V,c.y,0]):
-        descriptor((c.y*c.w+c.x)*V*e,0,[c.sy*c.w*V,c.oh,1],[c.ow*V,c.oh,1],[c.ow*V,c.oh,1]);
-      addCommand('A 的子块 → Y',c.sy===1?'修改源起点，保留原矩阵行距；输出紧密排列。':'源行距乘以取行步长，每次跳过不需要的行。这里重建了用于搬运的二维地址视图。',desc,
-        Array.from({length:c.oh},(_,r)=>makeSegment(r,Array.from({length:c.ow},(_,i)=>i))),{source:'A'});
-    }else{
-      for(let col=0;col<c.ow;col++)addCommand(`取第 ${col} 个输出列段`,'列间有间隔，不能把中间不要的数据也搬走。固定一列，跨多行执行窄 copy。',
-        descriptor((c.y*c.w+c.x+col*c.sx)*V*e,col*V*e,[c.sy*c.w*V,c.oh,1],[c.ow*V,c.oh,1],[V,c.oh,1]),
-        Array.from({length:c.oh},(_,r)=>makeSegment(r,[col])),{source:'A'});
+    // dim0 is contiguous depth (each displayed cell contains V elements).
+    // All blocks share one source pitch and one packed destination pitch.
+    for(let z=0;z<c.depth;z++){
+      const grid=source(`A${z}`,`原始 A · 深度 ${z}（dim0）`,c.h,c.w);
+      for(const cell of grid.cells){cell.depth=z;cell.element=((cell.row*c.w+cell.col)*c.depth+z)*V;cell.value=cell.element+1;}
     }
-    result.explain=c.sx===1?'这个子块可用一条二维 copy 表达。若要切出多个子块，就为每个输出重复生成描述符。':'隔列取数产生多个不连续的段。本方案每个输出列段一条 copy，不使用 gather/scatter。';
+    const coordinates=[];
+    for(let iz=0;iz<c.nz;iz++)for(let ix=0;ix<c.nx;ix++)for(let iy=0;iy<c.ny;iy++)coordinates.push([iz,ix,iy]);
+    const slowFirst=[...c.order].reverse().map(Number);
+    coordinates.sort((a,b)=>{for(const axis of slowFirst)if(a[axis]!==b[axis])return a[axis]-b[axis];return 0;});
+    const blockCells=c.oh*c.ow*c.od,fullDepth=c.od===c.depth;
+    init(coordinates.length*c.oh,c.ow*c.od);result.sliceTiles=[];
+    for(const [ordinal,index] of coordinates.entries()){
+      const [iz,ix,iy]=index,z0=c.z+iz*c.sz,x0=c.x+ix*c.sx,y0=c.y+iy*c.sy;
+      const tile={ordinal,index,origin:[z0,x0,y0],firstCell:ordinal*blockCells,firstEvent:result.events.length,byteOffset:ordinal*blockCells*V*e};
+      result.sliceTiles.push(tile);
+      const segments=[];
+      for(let y=0;y<c.oh;y++){
+        const rowPairs=[];
+        for(let x=0;x<c.ow;x++){
+          const pairs=[];
+          for(let z=0;z<c.od;z++){
+            const dst=tile.firstCell+(y*c.ow+x)*c.od+z;
+            Object.assign(result.output[dst],{tile:ordinal,localRow:y,localCol:x,localDepth:z});
+            pairs.push({src:result.sources[z0+z].cells[(y0+y)*c.w+x0+x],dst});
+          }
+          if(fullDepth)rowPairs.push(...pairs);
+          else segments.push({label:`小矩阵 ${ordinal+1} · 第 ${y} 行、第 ${x} 列的深度段`,pairs,tile:ordinal});
+        }
+        if(fullDepth)segments.push({label:`小矩阵 ${ordinal+1} · 第 ${y} 行（源第 ${y0+y} 行）`,pairs:rowPairs,tile:ordinal});
+      }
+      const desc=fullDepth?
+        descriptor(0,tile.byteOffset,[c.w*c.depth*V,c.h,1],[c.ow*c.od*V,c.oh,1],[c.ow*c.od*V,c.oh,1],[x0*c.depth*V,y0,0]):
+        descriptor(0,tile.byteOffset,[c.depth*V,c.w,c.h],[c.od*V,c.ow,c.oh],[c.od*V,c.ow,c.oh],[z0*V,x0,y0]);
+      addCommand(`小矩阵 ${ordinal+1} · 起点 (${z0},${x0},${y0})`,'一个小矩阵一条 COPY。块内连续取数；所有块共用相同源行距、相同目的行距，仅更新源起点和目的块基址。',desc,segments,{source:'A',tile:ordinal});
+    }
+    const overlap=[['nx','sx','ow'],['ny','sy','oh'],['nz','sz','od']].some(([n,s,o])=>c[n]>1&&c[s]<c[o]);
+    result.explain=`共 ${coordinates.length} 个小矩阵，每块 ${c.oh} 行 × ${c.ow} 列 × ${c.od} 深度；一块一条 COPY。所有块的源显示行距均为 ${c.w*c.depth*V*e}B，目的显示行距均为 ${c.ow*c.od*V*e}B。块起点按 dim${[...c.order].join(' → dim')} 从快到慢遍历。块间 stride 只改变下一块起点，不改变块内行距。${overlap?'当前块互相重叠，重叠数据会重复读取。':''}`;
   } else {
     const {p:P,q:Q}=outputShape(c), K=c.r*c.s*V;
     result.p=P;result.q=Q;result.k=K;
@@ -261,7 +290,9 @@ export function exportPlan(model){
   return {title:'TMA Copy Lab 教学描述符',referenceCommit:COMMIT,
     warning:'地址模型，不是机器码或 RTL 仿真；基地址为相应缓冲区内的字节偏移，需叠加实际且满足对齐的物理基地址。源目的不重叠。',
     units:'dim/start/box: elements, dim0 first; base offsets: bytes',
-    kind:model.kind,parameters:model.c,mode:'CONV',srcLayout:'LINEAR',dstLayout:'LINEAR',
+    revision:2,kind:model.kind,parameters:model.c,mode:'CONV',srcLayout:'LINEAR',dstLayout:'LINEAR',
+    sliceBlocks:model.sliceTiles??null,
+    writeOrder:model.kind==='im2col'?(model.c.strategy==='window'?'Complete each output row before the next.':'Reordered writes for comparison only; not guaranteed row-complete.'):'Block/command order as displayed.',
     precondition:model.prezero?'需要先由外部将输出清零。清零未计入下面的 copy 序列。':'无补零步骤',
     alignmentChecksPassed:model.rtlOK,
     commands:model.commands.map(({id,title,desc,rtl,source})=>({id,title,sourceBuffer:model.kind==='im2col'?'X':source,destinationBuffer:'Y',sourceView:source,...desc,rtl}))};

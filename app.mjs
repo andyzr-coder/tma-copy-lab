@@ -14,6 +14,12 @@ let comparison,metrics,addressReport;
 let kind=['copy','concat','slice','im2col'].includes(params.get('op'))?params.get('op'):'copy';
 const configs=structuredClone(defaults);
 for(const k of Object.keys(configs[kind]))if(params.has(k))configs[kind][k]=params.get(k);
+const migrationNote=params.get('revision')!=='2'?(kind==='slice'?'旧链接使用的是取样参数，已切换为新版多块 slice 起始例子。':kind==='im2col'&&params.get('strategy')&&params.get('strategy')!=='window'?'旧链接已保留形状参数，并将默认动画修正为先填完整一行。':''):'';
+// Old links encoded a sampled slice and a column-first default. Migrate once.
+if(params.get('revision')!=='2'){
+  if(kind==='slice')configs.slice=structuredClone(defaults.slice);
+  if(kind==='im2col')configs.im2col.strategy='window';
+}
 let model,step=0,lane=0,page=0,playing=false,timer=null,selection=null;
 let currentPreset=-1;
 const currentEvent=()=>model.events[Math.min(step,model.events.length-1)];
@@ -34,19 +40,20 @@ function renderConfig(){
     $('config-fields').innerHTML=selectField('axis','沿哪个方向拼接？',[['col','左右拼接 · dim0'],['row','上下拼接 · dim1']])+numberField('common',c.axis==='col'?'两边共同的行数':'两边共同的列数',1,6)+pair(numberField('a',c.axis==='col'?'A 的列数':'A 的行数',1,6),numberField('b',c.axis==='col'?'B 的列数':'B 的行数',1,6));
     $('parameter-note').textContent='未拼接的方向必须一样长。这里共用一个参数，避免生成无法拼接的形状。所有坐标从 0 开始。';
   }else if(kind==='slice'){
-    $('config-fields').innerHTML=pair(numberField('h','输入行数',2,7),numberField('w','输入列数',2,7))+pair(numberField('y','从第几行开始',0,c.h-1),numberField('x','从第几列开始',0,c.w-1))+pair(numberField('oh','输出行数',1,Math.floor((c.h-1-c.y)/c.sy)+1),numberField('ow','输出列数',1,Math.floor((c.w-1-c.x)/c.sx)+1))+pair(numberField('sy','取行步长',1,3),numberField('sx','取列步长',1,3));
-    $('parameter-note').textContent='起点从 0 计数。步长 1 连续取，步长 2 隔一个取一个。起点或步长改变时，输出尺寸自动限制在有效范围内。';
+    $('config-fields').innerHTML=pair(numberField('h','大矩阵行数 H',2,8),numberField('w','大矩阵列数 W',2,8))+numberField('depth','深度 D · dim0',1,4)+pair(numberField('oh','每块行数',1,c.h-c.y),numberField('ow','每块列数',1,c.w-c.x))+numberField('od','每块深度',1,c.depth-c.z)+pair(numberField('ny','纵向块数 · dim2',1,Math.floor((c.h-c.y-c.oh)/c.sy)+1),numberField('nx','横向块数 · dim1',1,Math.floor((c.w-c.x-c.ow)/c.sx)+1))+numberField('nz','深度块数 · dim0',1,Math.floor((c.depth-c.z-c.od)/c.sz)+1)+pair(numberField('sy','纵向块间 stride',1,c.h),numberField('sx','横向块间 stride',1,c.w))+numberField('sz','深度块间 stride',1,c.depth)+selectField('order','下一个块先沿哪个方向？',[['120','dim1 → dim2 → dim0（先向右）'],['210','dim2 → dim1 → dim0（先向下）'],['012','dim0 → dim1 → dim2'],['021','dim0 → dim2 → dim1'],['102','dim1 → dim0 → dim2'],['201','dim2 → dim0 → dim1']],'从快到慢；某一维走完才推进下一维。')+`<details class="storage-config"><summary>首块起点（默认全部为 0）</summary>${pair(numberField('y','起始行',0,c.h-1),numberField('x','起始列',0,c.w-1))}${numberField('z','起始深度',0,c.depth-1)}</details>`;
+    $('parameter-note').textContent='stride 是相邻块起点的间距，块内连续取数；各块共用同一套行距。stride=块尺寸时相接，小于尺寸时重叠，大于尺寸时留空。块数与尺寸会限制在不越界的范围内。深度连续存储；图中的水平行距与 COPY 的 dim0 行距在三维视图中可能不同。';
   }else{
     $('config-fields').innerHTML=pair(numberField('h','输入高 H',2,7),numberField('w','输入宽 W',2,7))+pair(numberField('r','核高 R',1,3),numberField('s','核宽 S',1,3))+pair(numberField('sh','纵向 stride',1,3),numberField('sw','横向 stride',1,3))+pair(numberField('dh','纵向 dilation',1,3),numberField('dw','横向 dilation',1,3))+pair(numberField('ph','上下各 pad',0,2),numberField('pw','左右各 pad',0,2))+selectField('n','Batch N',[1,2]);
     $('parameter-note').textContent='先保持 stride=1、dilation=1、pad=0。dilation=1 表示没有空洞。每格是一个像素；C 个通道一起收在这一格。';
   }
   $('storage-fields').innerHTML=selectField('vec',kind==='im2col'?'每像素通道数 C':'每格连续元素数',[1,2,4,8,16,32,64,128])+selectField('bytes','元素宽度',[[1,'8bit · 1B'],[2,'16bit · 2B'],[4,'32bit · 4B']]);
   for(const input of document.querySelectorAll('[data-param]')) input.addEventListener('change',()=>{
-    stop();const k=input.dataset.param;c[k]=input.tagName==='SELECT'&&k==='axis'?input.value:Number(input.value);currentPreset=-1;rebuild();
+    stop();const k=input.dataset.param;c[k]=['axis','order'].includes(k)?input.value:Number(input.value);currentPreset=-1;rebuild();
   });
 }
 function updateURL(){
   const url=new URL(location.href);url.search='';url.searchParams.set('op',kind);
+  url.searchParams.set('revision','2');
   for(const [k,v] of Object.entries(config()))url.searchParams.set(k,v);
   for(const [k,v] of Object.entries(costOptions))url.searchParams.set('perf_'+k,v);
   history.replaceState(null,'',url);
@@ -60,26 +67,29 @@ function rebuild(){
   renderConfig();renderIntro();renderPerformance();renderFrame();updateURL();
 }
 function renderIntro(){
-  const titles={copy:['COPY / 先学基础搬运','从 A 读出来，原样写到 Y','COPY 就是复制数据：源里的数值保留，在目的位置写入相同数值。一条指令可以描述多行搬运；后面的三个算子，就是安排这些搬运的起点、范围和顺序。'],concat:['CONCAT / 拼接','两个输入，分别写进一个输出','concat 的意思是拼接。A、B 各保持原来的顺序，写到输出中相邻的位置。输入数据不会做加法。'],slice:['SLICE / 切片','只取需要的部分，放到新矩阵里','slice 的意思是选取一部分。调整源起点、输出大小和取样步长，看看哪些数据被保留、哪些没有搬。'],im2col:['IM2COL / 窗口展开','一个窗口，成为输出的一行','在输入上滑动小窗口，把窗口中的数据按“核行 → 核列 → 通道”排成一行。只搬数据，还没有做卷积计算。']};
+  const titles={copy:['COPY / 先学基础搬运','从 A 读出来，原样写到 Y','COPY 就是复制数据：源里的数值保留，在目的位置写入相同数值。一条指令可以描述多行搬运；后面的三个算子，就是安排这些搬运的起点、范围和顺序。'],concat:['CONCAT / 拼接','两个输入，分别写进一个输出','concat 的意思是拼接。A、B 各保持原来的顺序，写到输出中相邻的位置。输入数据不会做加法。'],slice:['SLICE / 分块切分','一个大矩阵，切成多个小矩阵','每个小矩阵内部连续取数，所有小矩阵共用同一套行距。块间 stride 决定相邻块起点的间距；切分方向决定先搬哪一块。'],im2col:['IM2COL / 窗口展开','一个窗口，成为输出的一行','在输入上滑动小窗口，把窗口中的数据按“核行 → 核列 → 通道”排成一行。只搬数据，还没有做卷积计算。']};
   const [k,title,description]=titles[kind];$('operation-kicker').textContent=k;$('operation-title').textContent=title;$('operation-description').textContent=description;
   $('strategy-control').hidden=kind!=='im2col';
   $('copy-introduction').hidden=kind!=='copy';
+  $('slice-facts').hidden=kind!=='slice';
+  if(kind==='slice'){const c=config(),unit=model.vector*model.bytes;$('slice-facts').innerHTML=`<strong>同一套 stride，应用于所有小矩阵</strong><p>显示行起点间距：源 ${c.w*c.depth*unit}B；目的 ${c.ow*c.od*unit}B。每块 ${c.oh*c.ow*c.od*unit}B。</p><p>块起点步距：(dim0,dim1,dim2)=(${c.sz},${c.sx},${c.sy}) 格，对应 (${c.sz*unit},${c.sx*c.depth*unit},${c.sy*c.w*c.depth*unit})B。块内没有按此 stride 跳点。</p><p>遍历从快到慢：dim${[...c.order].join(' → dim')}。前三块源起点：${model.sliceTiles.slice(0,3).map(t=>tuple(t.origin)).join(' → ')}。</p>`;}
+  $('order-note').textContent=config().strategy==='window'?'当前：先完整填第 0 行，再填第 1 行；每行按核行 → 核列 → 通道展开。':'当前是优化对照：最终布局仍为一个窗口一行，但写入时间顺序改变。若要求逐行完成，请选“先按行填满”。';
   if(kind==='copy'){
     const c=config(),E=model.vector*model.bytes;
     $('copy-facts').innerHTML=`<div><span>① 从哪读 / 写到哪</span><b>A 第 ${c.srcX} 列 → Y 第 ${c.dstX} 列</b><small>各自缓冲区内起点：${c.srcX*E}B → ${c.dstX*E}B</small></div><div><span>② 每行搬多少</span><b>${c.cols} 格 × ${E}B = ${c.cols*E}B</b><small>box0 = ${c.cols*model.vector} 个元素，共搬 ${c.rows} 行</small></div><div><span>③ 下一行怎么走</span><b>源 +${c.srcCols*E}B · 目的 +${c.dstCols*E}B</b><small>这是两行起点的间距，不是额外搬运量</small></div>`;
   }
   for(const button of document.querySelectorAll('[data-strategy]'))button.setAttribute('aria-pressed',button.dataset.strategy===config().strategy);
   $('empty-state').hidden=!model.error;$('empty-state').textContent=model.error||'';$('visual-workspace').hidden=!!model.error;
-  const output=kind==='im2col'?`${model.rows} × ${model.k??0}`:`${model.rows} × ${model.cols*model.vector}`;
+  const output=kind==='slice'?`${model.sliceTiles.length} 块 × (${config().oh}×${config().ow}×${config().od*model.vector})`:kind==='im2col'?`${model.rows} × ${model.k??0}`:`${model.rows} × ${model.cols*model.vector}`;
   $('shape-strip').innerHTML=`<span class="shape-item">copy 指令<b class="green">${model.commands.length}</b><small>条</small></span><span class="shape-item">输出形状<b>${output}</b><small>元素</small></span><span class="shape-item">有效搬运<b>${fmt((model.payloadElements||0)*model.bytes)}</b><small>B</small></span>`+(model.zeroCount?`<span class="shape-item">补零位置<b>${fmt(model.zeroCount*model.vector)}</b><small>元素</small></span>`:'');
   $('input-shape').textContent=kind==='im2col'?`N${config().n} · H${config().h} W${config().w} C${model.vector}`:`每格 ${model.vector} 个元素`;
-  $('output-shape').textContent=kind==='im2col'?`${model.rows} 窗口 × ${model.cols} 核位置`:`${model.rows} 行 × ${model.cols} 格`;
+  $('output-shape').textContent=kind==='slice'?`${model.sliceTiles.length} 个小矩阵 · 每块 ${config().oh}×${config().ow}×${config().od}`:kind==='im2col'?`${model.rows} 窗口 × ${model.cols} 核位置`:`${model.rows} 行 × ${model.cols} 格`;
   $('zero-legend').hidden=!model.prezero;
   $('window-legend').hidden=kind!=='im2col';
   $('untouched-legend').hidden=kind!=='copy'||!model.output.some(o=>o.untouched);
   $('lane-control').hidden=model.vector===1;$('lane').max=model.vector-1;$('lane').value=0;
   $('lane-caption').textContent=`实际每次搬整个 ${model.vector} 元素段，而非只搬显示的通道。`;
-  $('learning-note').innerHTML=model.error?'':`<strong>观察重点：</strong>${model.explain}${kind==='im2col'?`<br><strong>三种拆法对照：</strong>当前 ${model.commands.length} 条 copy，均需读、写各 ${fmt(model.payloadElements*model.bytes)}B 有效数据。<a href="#bandwidth">下方比较实际段长度、请求数量和估算成本。</a>`:''}${model.prezero?'<br><strong>补零是前置步骤：</strong>假设整块输出已由外部清零，橙色格不会发起越界读取。清零未计入上方有效搬运，下方成本单独计入。':''}`;
+  $('learning-note').innerHTML=model.error?'':`<strong>观察重点：</strong>${model.explain}${kind==='im2col'?`<br><strong>三种拆法对照：</strong>当前 ${model.commands.length} 条 copy，均需读、写各 ${fmt(model.payloadElements*model.bytes)}B 有效数据。<a href="#bandwidth">下方比较实际段长度、请求数量和估算成本。</a>`:''}${model.prezero?'<br><strong>补零是前置步骤：</strong>假设整块输出已由外部清零，橙色格不会发起越界读取。清零未计入上方有效搬运，下方成本单独计入。':''}${migrationNote&&params.get('op')===kind?`<br><small>${migrationNote}</small>`:''}`;
 }
 const bytesLabel=n=>n>=1024?`${(n/1024).toFixed(n%1024?2:0)} KiB`:`${fmt(n)} B`;
 const timeLabel=n=>n>=1000?`${(n/1000).toFixed(2)} μs`:`${n.toFixed(1)} ns`;
@@ -99,12 +109,12 @@ function renderPerformance(){
   else {
     const selected=kind!=='im2col'||best.strategy===config().strategy;
     const saving=m.estimate?m.estimate.totalNs-best.metrics.estimate.totalNs:0;
-    $('cost-verdict-copy').innerHTML=`<div><strong>当前假设下建议：${esc(best.name)}</strong><p>${selected?'当前已经选择此候选。':`此候选估算为 ${timeLabel(best.metrics.estimate.totalNs)}${saving>0?`，比当前少 ${timeLabel(saving)}`:''}。`}仅在所列候选与假设内比较；改变端点或开销可能改变排序。${kind!=='im2col'?'连续行/面的合并已按 RTL 计入，无需为了减少请求重复做一维扁平化。':''}</p></div>`;
+    $('cost-verdict-copy').innerHTML=`<div><strong>${kind==='im2col'&&best.strategy!=='window'?'允许改变写入顺序时，成本最低：':'当前假设下建议：'}${esc(best.name)}</strong><p>${selected?'当前已经选择此候选。':`此候选估算为 ${timeLabel(best.metrics.estimate.totalNs)}${saving>0?`，比当前少 ${timeLabel(saving)}`:''}。`}仅在所列候选与假设内比较；改变端点或开销可能改变排序。${kind!=='im2col'?'连续行/面的合并已按 RTL 计入，无需为了减少请求重复做一维扁平化。':''}</p></div>`;
 
   }
   $('apply-recommended').hidden=kind!=='im2col'||!best;
   $('apply-recommended').disabled=!best||best.strategy===config().strategy;
-  $('apply-recommended').textContent=best?.strategy===config().strategy?'已使用建议方案':'应用建议，并在上方播放 ↑';
+  $('apply-recommended').textContent=best?.strategy===config().strategy?'已选择此候选':best?.strategy==='window'?'切回逐行完成，并播放 ↑':'对照更低成本（会改变写入顺序）↑';
   const range=xs=>xs.length?xs.length===1?`${fmt(xs[0])}B`:`${fmt(xs[0])}–${fmt(xs.at(-1))}B`:'—';
   $('cost-comparison').innerHTML=`<table class="cost-table"><caption>每个候选独立生成、检查和统计；请求列只计 COPY，清零单列说明，成本包含清零。</caption><thead><tr><th>拆分方案</th><th>指令 / 动画段</th><th>每段有效长度</th><th>合并后段数<br>读 / 写</th><th>端点请求数<br>读 / 写</th><th>估算成本</th><th>静态检查</th></tr></thead><tbody>${comparison.candidates.map(c=>{
     const x=c.metrics,active=kind!=='im2col'||c.strategy===config().strategy;
@@ -113,8 +123,9 @@ function renderPerformance(){
   const advice=[];const c=config();
   if(kind==='copy')advice.push(['先分清搬运长度和行距',`这条 COPY 每行读、写各 ${c.cols*model.vector*model.bytes}B。源、目的的行距分别决定下一行起点；未选中的位置不搬，也不清零。两边地址都连续时，控制器可以各自合并行；有间隔的那一侧会保留多个段。`],['再分清指令、请求和动画步','当前始终是一条二维 COPY。动画按行展示，控制器再根据连续性和端点规则生成请求，所以一条指令不等于一拍传完。先选“满足对齐的例子”，再看下表。']);
   if(kind==='concat')advice.push(c.axis==='row'?['上下拼接：两侧都连续','当前每个输入在源和目的中都占连续区域；控制器会自动合并连续行。主要成本是完整读取和写入各一次，继续减少描述符维度通常无额外带宽收益。']:['左右拼接：读端连续，写端分段','A、B 的源各自连续，目的每行中间要留出另一输入的位置。行越窄，请求和对齐越重要；如果生产者可直接写最终输出位置，可省去一次拼接搬运，但这需要上层接口配合。']);
-  if(kind==='slice')advice.push(c.sx>1?['隔列切片：窄段是主要限制','只搬选中的列可以减少有效字节，但每个窄段仍可能占一整拍，且当前 RTL 可能无法精确执行。整块先搬到片上再筛选是另一个架构选项，会多读数据，需要比较取样密度与片上重排成本。']:['连续切片：优先保留长行','整行连续时可自动合并；只切出行中一小段时，源端行之间仍有空隙。行步长改变地址间距，不会自动创造数据复用。']);
+  if(kind==='slice')advice.push(['统一行距，一块一条 COPY',`当前 ${model.sliceTiles.length} 块，源显示行距均为 ${c.w*c.depth*model.vector*model.bytes}B，目的显示行距均为 ${c.ow*c.od*model.vector*model.bytes}B。块内的连续深度或整行可按端点规则合并；源端仍可能存在块外空隙。`],['块间 stride 不等于取样步长','块尺寸越小，描述符启动和短段开销可能越突出。覆盖完整大矩阵且不重叠时，每个输入只读取一次；有间隔则少搬未选区域，重叠则重复读取。切换遍历方向会改变块的输出次序和页边界位置；本模型不假设跨块缓存收益。']);
   if(kind==='im2col'){
+    advice.push(['先确认是否要求逐行完成','本次默认按窗口：填完整一行后才换行。按核位置与核行分组只是允许改变写入顺序时的优化对照；即使估算更便宜，也不能替代有逐行交付要求的方案。最终矩阵布局相同，不代表交付顺序相同。']);
     advice.push(['先看真实 C × 元素字节数',`当前每像素 ${c.vec*c.bytes}B。通道较少时按核位置产生窄段；核行分组能在连续核列之间加宽，但仍须通过对齐检查。改变 C 会改变任务，不是免费的填充优化。`]);
     advice.push(c.dw>1?['横向 dilation：不能把空洞也写进去','相邻核位置的源地址不连续，核行分组退化为单格段。更宽的源读取需要片上筛选/重排，普通连续 COPY 不会自动丢弃空洞。']:['核行连续：比较请求数与启动开销','核行分组可一次搬多个核位置。重叠窗口按 q 的余数分组，保证源行距不小于搬运宽度；它可能减少 MIF 请求，也可能比按核位置使用更多指令。']);
     if(c.ph||c.pw)advice.push(['有 padding：边缘与内部成本不同','边缘有效段缩短，会产生更多分组；整个输出预先清零再覆盖有效位置，增加写流量。只清零边界或在片上生成零可能更省，但本版没有生成这样的清零指令。']);
@@ -154,6 +165,7 @@ function renderSources(activeKeys,commandKeys){
   $('source-grids').querySelectorAll('[data-source]').forEach(button=>button.onclick=()=>{stop();selection={type:'src',key:button.dataset.source};renderFrame(false);});
 }
 function renderOutput(activeDests,commandDests){
+  if(kind==='slice'){renderSliceOutput(activeDests,commandDests);return;}
   const totalPages=Math.max(1,Math.ceil(model.rows/ROWS_PER_PAGE));page=Math.max(0,Math.min(totalPages-1,page));
   const first=page*ROWS_PER_PAGE,last=Math.min(model.rows,first+ROWS_PER_PAGE),preview=$('preview-result').checked;
   const head=`<span class="matrix-axis">${kind==='im2col'?'窗口':'行\\列'}</span>`+Array.from({length:model.cols},(_,col)=>`<span class="matrix-axis">${kind==='im2col'?`${Math.floor(col/config().s)},${col%config().s}`:col}</span>`).join('');
@@ -174,6 +186,31 @@ function renderOutput(activeDests,commandDests){
   $('page-next').onclick=()=>{stop();$('follow-page').checked=false;page++;renderFrame(false);};
   $('output-grid').querySelectorAll('[data-destination]').forEach(button=>button.onclick=()=>{stop();selection={type:'dst',index:+button.dataset.destination};renderFrame(false);});
 }
+function renderSliceOutput(activeDests,commandDests){
+  const c=config(),tiles=model.sliceTiles,totalPages=Math.ceil(tiles.length/4),preview=$('preview-result').checked;
+  page=Math.max(0,Math.min(totalPages-1,page));
+  $('output-grid').innerHTML='<p class="slice-storage-note">每张卡是一块独立的小矩阵；为演示地址，各块按编号紧密放在 Y 中。块编号表示当前遍历顺序。</p><div class="slice-cards">'+tiles.slice(page*4,page*4+4).map(tile=>{
+    let layers='';
+    for(let z=0;z<c.od;z++){
+      let cells='<span class="matrix-axis">行/列</span>'+Array.from({length:c.ow},(_,x)=>`<span class="matrix-axis">${x}</span>`).join('');
+      for(let y=0;y<c.oh;y++){
+        cells+=`<span class="matrix-axis">${y}</span>`;
+        for(let x=0;x<c.ow;x++){
+          const idx=tile.firstCell+(y*c.ow+x)*c.od+z,out=model.output[idx],done=out.event<step;
+          const cls=['data-cell',done?'done':'pending',preview?'preview':'',commandDests.has(idx)&&!done?'command':'',activeDests.has(idx)?'current':'',selection?.type==='dst'&&selection.index===idx?'chosen':''].filter(Boolean).join(' ');
+          const val=done||preview?valueOf(out.from):'·';
+          cells+=`<button type="button" class="${cls}" data-destination="${idx}" aria-label="小矩阵${tile.ordinal+1}，第${y}行第${x}列深度${z}，${done?'已搬入':'待搬入'}，${val}" title="Y + ${hex(idx*model.vector*model.bytes)}">${val}</button>`;
+        }
+      }
+      layers+=`${c.od>1?`<small>块内深度 ${z}</small>`:''}<div class="matrix-scroll"><div class="data-matrix" style="--cols:${c.ow}">${cells}</div></div>`;
+    }
+    return `<article class="slice-card ${currentCommand()?.tile===tile.ordinal?'active-block':''}" data-tile="${tile.ordinal}"><h4>小矩阵 ${tile.ordinal+1}</h4><p>源起点 (dim0,1,2)=${tuple(tile.origin)}<br>目的 Y + ${hex(tile.byteOffset)}</p>${layers}</article>`;
+  }).join('')+'</div>';
+  $('matrix-pages').innerHTML=`<button type="button" id="page-prev" aria-label="上一页输出" ${page===0?'disabled':''}>‹</button><span>第 ${page*4+1}–${Math.min(tiles.length,page*4+4)} 块 / 共 ${tiles.length} 块</span><button type="button" id="page-next" aria-label="下一页输出" ${page===totalPages-1?'disabled':''}>›</button>`;
+  $('page-prev').onclick=()=>{stop();$('follow-page').checked=false;page--;renderFrame(false);};
+  $('page-next').onclick=()=>{stop();$('follow-page').checked=false;page++;renderFrame(false);};
+  $('output-grid').querySelectorAll('[data-destination]').forEach(button=>button.onclick=()=>{stop();selection={type:'dst',index:+button.dataset.destination};renderFrame(false);});
+}
 function renderReadout(){
   const event=currentEvent(),cmd=currentCommand();
   if(!event){$('readout').innerHTML='<div><strong>没有有效输入段需要读取。</strong><small>若输出全部属于 padding，结果由外部预置零准备，无需 copy 输入数据。</small></div>';return;}
@@ -184,7 +221,7 @@ function renderReadout(){
       $('readout').innerHTML=`<div><strong>选中 ${src.source}[${src.row}, ${src.col}]</strong> · 通道 ${lane} 的值是 <code>${valueOf(src)}</code><small>这一整段的首元素字节偏移 ${hex(getSourceByte(src))}；出现在 ${reuse} 个输出位置。</small></div><span class="readout-byte">${model.vector*model.bytes} B / 格</span>`;
     }else{
       const out=model.output[selection.index];
-      $('readout').innerHTML=`<div><strong>选中 Y 第 ${out.row} 行、第 ${out.col} 段</strong><small>${out.from?`来自 ${out.from.source}[${out.from.row}, ${out.from.col}]；由 COPY ${out.event!==undefined?model.events[out.event].command+1:'?'} 写入。`:out.untouched?'此位置不属于本条 COPY，保持原值；没有执行清零。':'这里越界，保持外部预置的 0，不读取输入。'}</small></div><span class="readout-byte">${out.from&&out.event>=step?'待搬入':out.from?valueOf(out.from):out.untouched?'保持原值':'0'}</span>`;
+      $('readout').innerHTML=`<div><strong>选中 ${kind==='slice'?`小矩阵 ${out.tile+1} · 第 ${out.localRow} 行、第 ${out.localCol} 列、深度 ${out.localDepth}`:`Y 第 ${out.row} 行、第 ${out.col} 段`}</strong><small>${out.from?`来自 ${out.from.source}[${out.from.row}, ${out.from.col}]；由 COPY ${out.event!==undefined?model.events[out.event].command+1:'?'} 写入。`:out.untouched?'此位置不属于本条 COPY，保持原值；没有执行清零。':'这里越界，保持外部预置的 0，不读取输入。'}</small></div><span class="readout-byte">${out.from&&out.event>=step?'待搬入':out.from?valueOf(out.from):out.untouched?'保持原值':'0'}</span>`;
     }
   }else if(step===model.events.length){
     $('readout').innerHTML=`<div><strong>搬运完成。所有有效输出位置都已写入。</strong><small>${model.commands.length} 条 copy · ${model.events.length} 个连续段${model.prezero?' · 越界部分保持预置零':''}。点击任意格查看它的来源。</small></div><span class="readout-byte">${fmt(model.payloadElements*model.bytes)} B</span>`;
@@ -227,12 +264,12 @@ function renderRTL(){
     box.innerHTML=`<span class="rtl-icon">✓</span><div><strong>当前 ${model.commands.length} 条描述符通过所列对齐与几何检查</strong><p>参考版本 ${COMMIT.slice(0,8)}。这不是 RTL 仿真或整机验证；还需有效物理地址、非重叠缓冲区与实际通道映射。${model.prezero?'输出清零依然是外部前置步骤。':''}</p></div>`;
   }else{
     const issues=cmd.rtl.issues.length?cmd.rtl.issues.map(i=>i.text):model.rtlIssues;
-    box.innerHTML=`<span class="rtl-icon">!</span><div><strong>数学拆分成立，但当前参数不能原样下发这版 RTL</strong><p>${cmd.rtl.ok?'当前这条通过检查，但其他指令仍有以下问题：':`当前 COPY ${cmd.id+1} 的问题：`}</p><ul>${issues.map(t=>`<li>${esc(t)}</li>`).join('')}</ul><p>可选择“满足对齐的例子 / 对齐后，4 条 copy”进行对照。增加通道数改变了示例数据形状，并非自动修复任意真实输入。</p></div>`;
+    box.innerHTML=`<span class="rtl-icon">!</span><div><strong>数学拆分成立，但当前参数不能原样下发这版 RTL</strong><p>${cmd.rtl.ok?'当前这条通过检查，但其他指令仍有以下问题：':`当前 COPY ${cmd.id+1} 的问题：`}</p><ul>${issues.map(t=>`<li>${esc(t)}</li>`).join('')}</ul><p>可选择“满足对齐的例子 / 对齐示例 · 逐行填完输出”进行对照。增加通道数改变了示例数据形状，并非自动修复任意真实输入。</p></div>`;
   }
 }
 function renderFrame(follow=true){
   const event=currentEvent(),cmd=currentCommand();
-  if(follow&&$('follow-page').checked&&event)page=Math.floor(model.output[event.pairs[0].dst].row/ROWS_PER_PAGE);
+  if(follow&&$('follow-page').checked&&event)page=kind==='slice'?Math.floor(model.output[event.pairs[0].dst].tile/4):Math.floor(model.output[event.pairs[0].dst].row/ROWS_PER_PAGE);
   const activePairs=step<model.events.length?event?.pairs??[]:[];
   const cmdEvents=cmd?model.events.slice(cmd.first,cmd.first+cmd.count):[];
   renderSources(new Set(activePairs.map(p=>p.src.key)),new Set(cmdEvents.flatMap(e=>e.pairs.map(p=>p.src.key))));
@@ -291,4 +328,4 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();});
 window.addEventListener('pagehide',stop);
 rebuild();
 // Public read-only state for reproducible browser checks, not a hardware interface.
-window.copyLab={getState:()=>({kind,config:{...config()},step,playing,commands:model.commands.length,events:model.events.length,rtlOK:model.rtlOK,zeroCount:model.zeroCount,output:model.output.map(o=>({from:o.from?.value??0,event:o.event,untouched:!!o.untouched})),addresses:{current:addressReport.segments[Math.min(step,model.events.length-1)]??null,buffers:addressReport.buffers,selected:selectedAddresses(model,addressReport,selection,lane)},performance:{assumptions:{...costOptions},eligible:metrics.eligible,estimate:metrics.estimate,recommended:comparison.best?.strategy??null,tile:tileScenario(model,costOptions)}})};
+window.copyLab={getState:()=>({kind,config:{...config()},step,playing,commands:model.commands.length,events:model.events.length,rtlOK:model.rtlOK,zeroCount:model.zeroCount,sliceTiles:model.sliceTiles??null,output:model.output.map(o=>({from:o.from?.value??0,event:o.event,row:o.row,tile:o.tile,untouched:!!o.untouched})),addresses:{current:addressReport.segments[Math.min(step,model.events.length-1)]??null,buffers:addressReport.buffers,selected:selectedAddresses(model,addressReport,selection,lane)},performance:{assumptions:{...costOptions},eligible:metrics.eligible,estimate:metrics.estimate,recommended:comparison.best?.strategy??null,tile:tileScenario(model,costOptions)}})};

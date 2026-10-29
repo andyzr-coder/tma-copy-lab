@@ -3,7 +3,7 @@
 import {exactAddress} from './engine.mjs';
 
 export const EXAMPLE_BASES={A:0x10000000,X:0x10000000,B:0x20000000,Y:0x30000000};
-export const sourceBuffer=(model,source)=>model.kind==='im2col'?'X':source;
+export const sourceBuffer=(model,source)=>model.kind==='im2col'?'X':model.kind==='slice'?'A':source;
 export const sourceOffset=(model,cell)=>(model.kind==='im2col'?cell.value-1:cell.element)*model.bytes;
 const range=(base,offset,length)=>({offset,start:base+offset,end:base+offset+length-1,length});
 const phase=value=>Number.isFinite(+value)?Math.floor(Math.max(0,Math.min(3968,+value))/128)*128:0;
@@ -12,6 +12,7 @@ export function addressTrace(model,options={}){
   const srcPage=phase(options.srcPage),dstPage=phase(options.dstPage),unit=model.vector*model.bytes;
   const buffers=[];
   if(model.kind==='im2col')buffers.push({id:'X',base:EXAMPLE_BASES.X+srcPage,bytes:model.sources.reduce((n,s)=>n+s.cells.length*unit,0)});
+  else if(model.kind==='slice')buffers.push({id:'A',base:EXAMPLE_BASES.A+srcPage,bytes:model.inputElements*model.bytes});
   else for(const s of model.sources)buffers.push({id:s.id,base:EXAMPLE_BASES[s.id]+srcPage,bytes:s.cells.length*unit});
   buffers.push({id:'Y',base:EXAMPLE_BASES.Y+dstPage,bytes:model.output.length*unit});
   for(const b of buffers)b.end=b.bytes?b.base+b.bytes-1:null;
@@ -50,7 +51,7 @@ export function selectedAddresses(model,trace,selection,lane=0){
   }
   const out=model.output[selection.index];if(!out)return null;
   const offset=selection.index*unit;
-  const result={kind:out.untouched?'untouched':out.from?'destination':'padding',label:`Y[${out.row},${out.col}]`,lane:channel,
+  const result={kind:out.untouched?'untouched':out.from?'destination':'padding',label:model.kind==='slice'?`小矩阵 ${out.tile+1}[${out.localRow},${out.localCol},${out.localDepth}]`:`Y[${out.row},${out.col}]`,lane:channel,
     buffer:'Y',cell:range(trace.bases.Y,offset,unit),element:range(trace.bases.Y,offset+channel*model.bytes,model.bytes)};
   if(out.from){const buffer=sourceBuffer(model,out.from.source);result.sourceBuffer=buffer;result.sourceElement=range(trace.bases[buffer],sourceOffset(model,out.from)+channel*model.bytes,model.bytes);}
   return result;
@@ -67,9 +68,10 @@ export function coordinateCalculation(model,eventIndex){
     destination=`(m × K + (r × S + s) × C + c) × E\n= (${m} × ${model.k} + (${r} × ${c.s} + ${s}) × ${V} + 0) × ${E}`;
     meaning=`当前窗口 (p,q)=(${p},${q})，核位置 (r,s)=(${r},${s})。h = ${p}×${c.sh} − ${c.ph} + ${r}×${c.dh} = ${h}；w = ${q}×${c.sw} − ${c.pw} + ${s}×${c.dw} = ${w}。m=${m}，K=R×S×C=${model.k}；c=0 表示本段第一个通道。`;
   }else if(model.kind==='slice'){
-    source=`(((起始行 + 输出行 × 取行步长) × W + 起始列 + 输出列 × 取列步长) × V) × E\n= (((${c.y} + ${out.row} × ${c.sy}) × ${c.w} + ${c.x} + ${out.col} × ${c.sx}) × ${V}) × ${E}`;
-    destination=`(输出行 × 输出宽 + 输出列) × V × E\n= (${out.row} × ${c.ow} + ${out.col}) × ${V} × ${E}`;
-    meaning='源起点包含切片偏移；取行/取列步长决定跳过哪些位置。目的按切片后的行宽紧密排列。V 是每格连续元素数。';
+    const tile=model.sliceTiles[out.tile],[z0,x0,y0]=tile.origin;
+    source=`(((y0 + 块内行) × W + x0 + 块内列) × D + z0 + 块内深度) × V × E\n= (((${y0} + ${out.localRow}) × ${c.w} + ${x0} + ${out.localCol}) × ${c.depth} + ${z0} + ${out.localDepth}) × ${V} × ${E}`;
+    destination=`块序号 × 每块字节数 + ((块内行 × 块宽 + 块内列) × 块深 + 块内深度) × V × E\n= ${out.tile} × ${c.oh*c.ow*c.od*V*E} + ((${out.localRow} × ${c.ow} + ${out.localCol}) × ${c.od} + ${out.localDepth}) × ${V} × ${E}`;
+    meaning=`小矩阵 ${out.tile+1}，起点 (z0,x0,y0)=(${tile.origin.join(',')})；各轴起点=初始起点+该轴块索引×块间 stride。所有块共用源显示行距 ${c.w*c.depth*V*E}B 和目的显示行距 ${c.ow*c.od*V*E}B。小矩阵依遍历顺序紧密存入 Y，编号从 1 显示，地址计算的块序号从 0 开始。`;
   }else{
     const grid=model.sources.find(s=>s.id===pair.src.source);
     source=`(源行 × 源行总格数 + 源列) × V × E\n= (${pair.src.row} × ${grid.cols} + ${pair.src.col}) × ${V} × ${E}`;

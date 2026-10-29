@@ -82,7 +82,7 @@ export function compare(kind,config,input={}){
   const strategies=kind==='im2col'?['kernel','window','row']:[null];
   const candidates=strategies.map(strategy=>{
     const model=build(kind,strategy?{...config,strategy}:config);
-    return {strategy:strategy||kind,name:strategyNames[strategy]||'当前二维 COPY',model,metrics:analyze(model,input)};
+    return {strategy:strategy||kind,name:strategyNames[strategy]||(kind==='slice'?'当前多块 COPY':'当前二维 COPY'),model,metrics:analyze(model,input)};
   });
   const legal=candidates.filter(c=>c.metrics.eligible).sort((a,b)=>a.metrics.estimate.totalNs-b.metrics.estimate.totalNs||a.model.commands.length-b.model.commands.length);
   return {candidates,best:legal[0]||null};

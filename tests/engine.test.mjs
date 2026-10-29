@@ -29,7 +29,18 @@ function checkReference(m){
       else expected.push(r<c.a?`A:${r}:${col}`:`B:${r-c.a}:${col}`);
     }
   }else if(m.kind==='slice'){
-    for(let r=0;r<c.oh;r++)for(let col=0;col<c.ow;col++)expected.push(`A:${c.y+r*c.sy}:${c.x+col*c.sx}`);
+    const blocks=[];
+    // Independent mixed-radix ordinal, not the model's axis comparator.
+    const counts=[c.nz,c.nx,c.ny],steps=[c.sz,c.sx,c.sy],starts=[c.z,c.x,c.y];
+    for(let ordinal=0;ordinal<c.nx*c.ny*c.nz;ordinal++){
+      const origin=[...starts];let remainder=ordinal;
+      for(const a of c.order){const axis=Number(a);origin[axis]+=(remainder%counts[axis])*steps[axis];remainder=Math.floor(remainder/counts[axis]);}
+      blocks.push(origin);
+      for(let r=0;r<c.oh;r++)for(let col=0;col<c.ow;col++)for(let z=0;z<c.od;z++)expected.push(`A${origin[0]+z}:${origin[2]+r}:${origin[1]+col}`);
+    }
+    assert.deepEqual(m.sliceTiles.map(t=>t.origin),blocks);
+    assert.equal(m.commands.length,c.nx*c.ny*c.nz);
+    for(const cmd of m.commands){assert.deepEqual(cmd.desc.srcGlb,m.commands[0].desc.srcGlb);assert.deepEqual(cmd.desc.dstGlb,m.commands[0].desc.dstGlb);}
   }else{
     const P=Math.max(0,Math.floor((c.h+2*c.ph-(c.r-1)*c.dh-1)/c.sh)+1);
     const Q=Math.max(0,Math.floor((c.w+2*c.pw-(c.s-1)*c.dw-1)/c.sw)+1);
@@ -44,10 +55,10 @@ function checkReference(m){
   checkDescriptors(m);
 }
 
-test('The introductory examples produce two, one and four copies',()=>{
+test('Defaults are multi-block slice and row-complete im2col',()=>{
   assert.equal(build('concat').commands.length,2);
-  assert.equal(build('slice').commands.length,1);
-  assert.equal(build('im2col').commands.length,4);
+  assert.equal(build('slice').commands.length,8);
+  assert.equal(build('im2col').commands.length,18);
   assert.equal(build('im2col',{strategy:'window'}).commands.length,18);
   for(const kind of Object.keys(defaults))checkReference(build(kind));
 });
@@ -106,7 +117,23 @@ test('Empty and all-padding outputs do not read invalid memory',()=>{
   assert.equal(allZero.commands.length,0);assert.equal(allZero.zeroCount,4);assert.equal(allZero.prezero,true);
   checkReference(allZero);
 });
-test('Slice parameters are clamped to the available sampled extent',()=>{
+test('Slice blocks are clamped to available extent without sampling inside blocks',()=>{
   const c=normalize('slice',{h:5,w:6,y:4,x:5,oh:7,ow:7,sy:3,sx:3});
   assert.equal(c.oh,1);assert.equal(c.ow,1);checkReference(build('slice',c));
+});
+test('All slice traversal orders preserve uniform pitch and exact 3D block values',()=>{
+  for(const order of ['012','021','102','120','201','210'])for(const vec of [1,128])for(const stride of [1,2,3]){
+    checkReference(build('slice',{depth:4,od:2,nz:3,sz:stride,sx:stride,sy:stride,nx:4,ny:3,order,vec}));
+  }
+  const m=build('slice');assert.equal(new Set(m.output.map(o=>o.from.key)).size,32);
+  assert.deepEqual(m.output.slice(0,4).map(o=>o.from.value),[1,2,9,10]);
+  assert.deepEqual(m.output.slice(4,8).map(o=>o.from.value),[3,4,11,12]);
+  assert.deepEqual(build('slice',{order:'210'}).output.slice(4,8).map(o=>o.from.value),[17,18,25,26]);
+});
+test('Default im2col completes rows in order including padding and dilation',()=>{
+  for(const config of [{},{n:2,ph:1,pw:1,r:3,s:3},{h:5,w:5,dh:2,dw:2},{h:5,w:5,sh:2,sw:2}]){
+    const m=build('im2col',config),writes=m.events.flatMap(e=>e.pairs.map(p=>p.dst));
+    assert.deepEqual(writes,[...writes].sort((a,b)=>a-b));
+    assert.equal(m.c.strategy,'window');checkReference(m);
+  }
 });

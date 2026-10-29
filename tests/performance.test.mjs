@@ -13,7 +13,7 @@ test('Narrow unsupported descriptors have no fabricated bus counts or time',()=>
   assert.equal(m.logicalRead,72);assert.equal(m.logicalWrite,72);assert.equal(m.uniqueInputBytes,32);assert.equal(m.reuse,2.25);
 });
 test('Read and write merge independently, and endpoints count requests differently',()=>{
-  const model=build('im2col',{vec:128});
+  const model=build('im2col',{vec:128,strategy:'kernel'});
   const a=analyze(model,{ports:'mif-mif'}),b=analyze(model,{ports:'l1-mif'});
   assert.equal(a.read.segments,12);assert.equal(a.write.segments,36);
   assert.equal(a.read.beats,72);assert.equal(a.write.beats,72);
